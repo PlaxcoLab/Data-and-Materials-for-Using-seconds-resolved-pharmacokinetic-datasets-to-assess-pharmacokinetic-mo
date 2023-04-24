@@ -1,0 +1,2919 @@
+---
+title: "R Markdown: Using seconds-resolved pharmacokinetic datasets to assess pharmacokinetic models encompassing time-varying physiology"
+author: "Matthew H. McDonough"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r Libs_and_Function_Source, echo = F, warning = F, message = F, results = 'hide', eval = T, cache = T}
+
+# set seed
+set.seed(11235813)
+
+# Load all required libraries
+library(here)
+library(nlWaldTest)
+library(minpack.lm)
+library(colorBlindness)
+library(shape)
+library(nloptr)
+
+# Set path to where Rat_Data_Long_Format.csv and All_Functions.R live.
+path.to.files <- ""
+
+# source All_Functions.R
+source(here(path.to.files,"All_Functions.R"))
+
+```
+
+```{r data_load, echo = F, warning = F, message = F, results = 'hide', eval = T, cache = T}
+
+# load rat data
+rat_data_load <- Rat_Data_Load(path.to.files)
+
+# all rat data
+rat_list_full <- rat_data_load$rat_list_full
+
+# subset of rat data used in paper
+rat_list <- rat_data_load$rat_list
+
+```
+
+```{r subset_rat_data, echo = F, warning = F, message = F, results = 'hide', eval = T, cache = T}
+
+#--------------------------------------------------------------
+# Set number of observations to subset
+#--------------------------------------------------------------
+
+subset.n = 10
+
+#--------------------------------------------------------------
+# Create function to grab inclusive median of a dataset
+# i.e. the point will exist in the dataset
+#--------------------------------------------------------------
+
+inclusive.median.func <- function(y){
+  
+  return(unlist(quantile(y, probs = c(0.5), na.rm = FALSE,
+                         names = TRUE, type = 1)))
+  
+}
+
+#--------------------------------------------------------------
+# Create a function to grab the inclusive median of time 
+# for `subset.n`-number of equally sized bins
+#--------------------------------------------------------------
+
+inclusive.median <- function(x){
+  
+  inclusive.median <- aggregate(x, 
+                                by = list(cut(x$time,
+                                              seq(min(x$time),
+                                                  max(x$time),length.out = subset.n + 1))),
+                                inclusive.median.func)
+  
+  return(list(x[which(x$time  %in% inclusive.median$time),]))
+  
+}
+
+#--------------------------------------------------------------
+# Apply `inclusive.median` function
+#--------------------------------------------------------------
+
+inclusive.median.set <- sapply(rat_list, inclusive.median)
+
+
+```
+
+```{r some_stats_of_rat_list_full, echo = F, warning = F, message = F, eval = T, cache = T}
+
+#=============================================================================================
+#---------------------------------------------------------------------------------------------
+# Some summary statistics for all rats, i.e., rat_list_full
+#---------------------------------------------------------------------------------------------
+#=============================================================================================
+
+#--------------------------------------------------------------
+# Calculate time-resolution for all rats
+#--------------------------------------------------------------
+
+time_res_full <- c()
+
+for(i in 1:NROW(rat_list_full)){
+  # calculate the median time resolution for each rat 
+  time_res_full[i] <- 60^2*median(-rat_list_full[[i]]$time[1:NROW(rat_list_full[[i]])-1]+ 
+                                   rat_list_full[[i]]$time[2:NROW(rat_list_full[[i]])  ] )
+}
+
+print('Time Resolution - Full Data')
+summary(time_res_full)
+
+#--------------------------------------------------------------
+# Calculate Number of Observations for all rats
+#--------------------------------------------------------------
+
+num_obs_full <- c()
+
+for(i in 1:NROW(rat_list_full)){
+  num_obs_full[i] <- NROW(rat_list_full[[i]])
+}
+
+print('Number of Observations - Full Data')
+summary(num_obs_full)
+
+#--------------------------------------------------------------
+# Print out the Length of Observation Period for all rats
+#--------------------------------------------------------------
+
+max_time_full <- c()
+
+for(i in 1:NROW(rat_list_full)){
+  max_time_full[i] <- max(rat_list_full[[i]]$time)
+}
+
+print('Maximum Length of Observation - Full Data')
+summary(max_time_full)
+
+#--------------------------------------------------------------
+# Identify which rats have an observation period less than 1hr
+#--------------------------------------------------------------
+
+print('Which Rats are less than 1hr - Full Data')
+which(max_time_full < 1)
+
+# > which(max_time_full < 1)
+# 5 11 12 14
+#
+# The above output corresponds to FR5, MR6, MR7, and MR9
+# These rats are removed from the `rat_list` list in the 
+# `Rat_Data_Load` function
+```
+
+```{r some_stats_of_rat_list, echo = F, warning = F, message = F, eval = T, cache = T}
+
+#=============================================================================================
+#---------------------------------------------------------------------------------------------
+# Some summary statistics for remaining rats, i.e., rat_list
+#---------------------------------------------------------------------------------------------
+#=============================================================================================
+
+#--------------------------------------------------------------
+# Calculate time-resolution for remaining rats
+#--------------------------------------------------------------
+
+time_res <- c()
+
+for(i in 1:NROW(rat_list)){
+  # calculate the median time resolution for each rat 
+  time_res[i] <- 60^2*median(-rat_list[[i]]$time[1:NROW(rat_list[[i]])-1]+  
+                              rat_list[[i]]$time[2:NROW(rat_list[[i]])  ] ) 
+}
+
+print('Time Resolution - Subset Data')
+summary(time_res)
+
+#--------------------------------------------------------------
+# Calculate Number of Observations for remaining rats
+#--------------------------------------------------------------
+
+num_obs <- c()
+
+for(i in 1:NROW(rat_list)){
+  num_obs[i] <- NROW(rat_list[[i]])
+}
+
+print('Number of Observations - Subset Data')
+summary(num_obs)
+
+#--------------------------------------------------------------
+# Print out the Length of Observation Period for remaining rats
+#--------------------------------------------------------------
+
+max_time <- c()
+
+for(i in 1:NROW(rat_list)){
+  max_time[i] <- max(rat_list[[i]]$time)
+}
+
+print('Maximum Length of Observation - Subset Data')
+summary(max_time)
+
+```
+## Figure 2
+```{r Figure_2, echo = F, warning = F, message = F, results = 'hide', eval = T, cache = T, fig.width = 8.5, fig.height = 11}
+
+#--------------------------------------------------------------
+# Set parameters for estimation
+# (these same parameters are used throughout the study)
+#--------------------------------------------------------------
+
+max_iter <- 50
+converge_crit <- 1e-5
+
+# define rat labels
+rat.labels <- c("FR1", "FR2", "FR3", "FR4", "MR1", "MR2", "MR3", "MR4", "MR5", "MR8")
+
+#--------------------------------------------------------------
+# Select FR1
+#--------------------------------------------------------------
+
+input.rat.data <- rat_list[[1]]
+
+#--------------------------------------------------------------
+# Apply each model
+#--------------------------------------------------------------
+
+considered.models <- c('C_1CM', 'L_1CM', 'E_1CM', 'R_1CM', 'C_2CM')
+
+for(i in 1:NROW(considered.models)){
+  assign(paste0(rat.labels[1],'_full.data_',considered.models[i],'.nls.fit'),
+         PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                             model = considered.models[i],
+                             max_iter = max_iter,
+                             converge_crit = converge_crit))
+}
+
+#=========================================================
+#---------------------------------------------------------
+# Figure 2
+#---------------------------------------------------------
+#=========================================================
+
+ColorBlindColors_cuvres  <- c(
+  rgb(43/255, 41/255, 43/255), # Black
+  rgb(39/255, 108/255, 189/255), # Strong-blue
+  rgb(241/255, 191/255, 21/255), # Vivid-yellow
+  rgb(247/255, 118/255, 11/255), # Vivid-orange
+  rgb(213/255, 28/255, 60/255) # Vivid-red
+)
+
+ColorBlindColors_points  <- c(rgb(138/255, 132/255, 137/255)) # Medium-gray
+
+lty_cuvres  <- c(1,2,4,5,6)
+
+par(mfrow=c(1,1), pty="s", bg = 'white')
+
+plot(input.rat.data$time, input.rat.data$conc.C_P,
+     type='p',
+     pch = 16,
+     cex = 0.75,
+     main = "",
+     font = 2,
+     xlab = "",
+     ylab = "",
+     cex.axis = 1.5,
+     ylim = c(0-0.1,max(input.rat.data$conc.C_P)+1),
+     xaxs = "i",
+     las = 1,
+     col = ColorBlindColors_points[1])
+mtext(side = 1, line =2.5, "Time (h)",
+      font = 2, cex = 1.5)
+mtext(side = 2, line = 2.5, expression(bold(paste("Concentration (",mu,"M)"))),
+      font = 2, cex = 1.5)
+abline(h = 0, lty = 1)
+abline(v = 0, lty = 3)
+
+#-----------#
+# C_1CM Fit #
+#-----------#
+
+C_1CM.fitted.curve <- C_P.fit('C_1CM',
+        input.rat.data$time,
+        D_0 = min(input.rat.data$D_0),
+        V_P = coef(get(paste0(rat.labels[1],'_full.data_','C_1CM','.nls.fit')))[1],
+        k_E = coef(get(paste0(rat.labels[1],'_full.data_','C_1CM','.nls.fit')))[2])
+  
+lines(input.rat.data$time, C_1CM.fitted.curve,
+      type = 'l', lwd = 4, col = ColorBlindColors_cuvres[1],
+      lty = lty_cuvres[1])
+text(x= 0.45, y = 92.5,
+     pos = 4,
+     labels=c('Standard one-compartment'),
+     col = ColorBlindColors_cuvres[1], font = 2, cex = 1.25)
+Arrows(0.45, 92.5,
+       0.04, 92.5,
+       col = ColorBlindColors_cuvres[1],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+#-----------#
+# C_2CM Fit #
+#-----------#
+
+C_2CM.fitted.curve <- C_P.fit('C_2CM',
+        input.rat.data$time,
+        D_0 = min(input.rat.data$D_0),
+        A = coef(get(paste0(rat.labels[1],'_full.data_','C_2CM','.nls.fit')))[1],
+        a = coef(get(paste0(rat.labels[1],'_full.data_','C_2CM','.nls.fit')))[2],
+        B = coef(get(paste0(rat.labels[1],'_full.data_','C_2CM','.nls.fit')))[3],
+        b = coef(get(paste0(rat.labels[1],'_full.data_','C_2CM','.nls.fit')))[4])
+
+lines(input.rat.data$time, C_2CM.fitted.curve,
+      type = 'l',lwd = 4, col = ColorBlindColors_cuvres[2],
+      lty = lty_cuvres[1])
+text(x = 0.45, y = 67.5,
+     pos = 4,
+     labels=c('Standard two-compartment'),
+     col = ColorBlindColors_cuvres[2], font = 2, cex = 1.25)
+Arrows(0.45, 67.5, 
+       0.22, 67.5, 
+       col = ColorBlindColors_cuvres[2],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+# replot C_1CM arrow as other curves cover it
+
+Arrows(0.45, 92.5,
+       0.04, 92.5,
+       col = ColorBlindColors_cuvres[1],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+```
+## Figure 3
+```{r Figure_3, echo = F, warning = F, message = F, results = 'hide', eval = T, cache = T, fig.width = 8.5, fig.height = 11}
+
+#===============================================================================================
+#-----------------------------------------------------------------------------------------------
+# Figure 3
+#-----------------------------------------------------------------------------------------------
+#===============================================================================================
+
+par(mfrow=c(1,1), pty="s", bg = 'white')
+
+plot(input.rat.data$time, input.rat.data$conc.C_P,
+     type='p',
+     pch = 16,
+     cex = 0.75,
+     main = "",
+     font = 2,
+     xlab = "",
+     ylab = "",
+     cex.axis = 1.5,
+     ylim = c(0-0.1,max(input.rat.data$conc.C_P)+1),
+     xaxs = "i",
+     las = 1,
+     col = ColorBlindColors_points[1])
+mtext(side = 1, line =2.5, "Time (h)",
+      font = 2, cex = 1.5)
+mtext(side = 2, line = 2.5, expression(bold(paste("Concentration (",mu,"M)"))),
+      font = 2, cex = 1.5)
+abline(h = 0, lty = 1)
+abline(v = 0, lty = 3)
+
+#-----------#
+# C_1CM Fit #
+#-----------#
+
+C_1CM.fitted.curve <- C_P.fit('C_1CM',
+        input.rat.data$time,
+        D_0 = min(input.rat.data$D_0),
+        V_P = coef(get(paste0(rat.labels[1],'_full.data_','C_1CM','.nls.fit')))[1],
+        k_E = coef(get(paste0(rat.labels[1],'_full.data_','C_1CM','.nls.fit')))[2])
+  
+lines(input.rat.data$time, C_1CM.fitted.curve,
+      type = 'l', lwd = 4, col = ColorBlindColors_cuvres[1],
+      lty = lty_cuvres[1])
+text(x= 0.45, y = 92.5,
+     pos = 4,
+     labels=c('Standard one-compartment'),
+     col = ColorBlindColors_cuvres[1], font = 2, cex = 1.25)
+Arrows(0.45, 92.5,
+       0.04, 92.5,
+       col = ColorBlindColors_cuvres[1],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+#-----------#
+# C_2CM Fit #
+#-----------#
+
+C_2CM.fitted.curve <- C_P.fit('C_2CM',
+        input.rat.data$time,
+        D_0 = min(input.rat.data$D_0),
+        A = coef(get(paste0(rat.labels[1],'_full.data_','C_2CM','.nls.fit')))[1],
+        a = coef(get(paste0(rat.labels[1],'_full.data_','C_2CM','.nls.fit')))[2],
+        B = coef(get(paste0(rat.labels[1],'_full.data_','C_2CM','.nls.fit')))[3],
+        b = coef(get(paste0(rat.labels[1],'_full.data_','C_2CM','.nls.fit')))[4])
+
+lines(input.rat.data$time, C_2CM.fitted.curve,
+      type = 'l',lwd = 4, col = ColorBlindColors_cuvres[2],
+      lty = lty_cuvres[1])
+text(x = 0.45, y = 67.5,
+     pos = 4,
+     labels=c('Standard two-compartment'),
+     col = ColorBlindColors_cuvres[2], font = 2, cex = 1.25)
+Arrows(0.45, 67.5, 
+       0.22, 67.5, 
+       col = ColorBlindColors_cuvres[2],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+#-----------#
+# L_1CM Fit #
+#-----------#
+
+L_1CM.fitted.curve <- C_P.fit('L_1CM',
+        input.rat.data$time,
+        D_0 = min(input.rat.data$D_0),
+        V_P = coef(get(paste0(rat.labels[1],'_full.data_','L_1CM','.nls.fit')))[1],
+        k_E0 = coef(get(paste0(rat.labels[1],'_full.data_','L_1CM','.nls.fit')))[2],
+        b_E = coef(get(paste0(rat.labels[1],'_full.data_','L_1CM','.nls.fit')))[3])
+
+lines(input.rat.data$time, L_1CM.fitted.curve,
+      type = 'l',lwd = 4, col = ColorBlindColors_cuvres[3],
+      lty = lty_cuvres[1])
+text(x= 0.45, y = 62.5,
+     pos = 4,
+     labels=c('Linearly varying one-compartment'),
+     col = ColorBlindColors_cuvres[3], font=2, cex = 1.25)
+Arrows(0.45, 62.5, 
+       0.26, 62.5, 
+       col = ColorBlindColors_cuvres[3],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+#-----------#
+# E_1CM Fit #
+#-----------#
+
+E_1CM.fitted.curve <- C_P.fit('E_1CM',
+        input.rat.data$time,
+        D_0 = min(input.rat.data$D_0),
+        V_P = coef(get(paste0(rat.labels[1],'_full.data_','E_1CM','.nls.fit')))[1],
+        k_E0 = coef(get(paste0(rat.labels[1],'_full.data_','E_1CM','.nls.fit')))[2],
+        b_E = coef(get(paste0(rat.labels[1],'_full.data_','E_1CM','.nls.fit')))[3])
+
+lines(input.rat.data$time, E_1CM.fitted.curve,
+      type = 'l', lwd = 4, col = ColorBlindColors_cuvres[4],
+      lty = lty_cuvres[1])
+text(x= 0.45, y = 57.5,
+     pos = 4,
+     labels = c('Exponentially varying one-compartment'),
+     col = ColorBlindColors_cuvres[4], font = 2, cex = 1.25)
+Arrows(0.45, 57.5, 
+       0.30, 57.5, 
+       col = ColorBlindColors_cuvres[4],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+#-----------#
+# R_1CM Fit #
+#-----------#
+
+R_1CM.fitted.curve <- C_P.fit('R_1CM',
+        input.rat.data$time,
+        D_0 = min(input.rat.data$D_0),
+        V_P = coef(get(paste0(rat.labels[1],'_full.data_','R_1CM','.nls.fit')))[1],
+        k_E0 = coef(get(paste0(rat.labels[1],'_full.data_','R_1CM','.nls.fit')))[2],
+        b_E = coef(get(paste0(rat.labels[1],'_full.data_','R_1CM','.nls.fit')))[3])
+
+lines(input.rat.data$time, R_1CM.fitted.curve,
+      type = 'l', lwd = 4, col = ColorBlindColors_cuvres[5],
+      lty = lty_cuvres[1])
+text(x= 0.45, y = 52.5,
+     pos = 4,
+     labels = c('Reciprocally varying one-compartment'),
+     col = ColorBlindColors_cuvres[5], font = 2, cex = 1.25)
+Arrows(0.45, 52.5, 
+       0.34, 52.5, 
+       col = ColorBlindColors_cuvres[5],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+# replot C_1CM arrow as other curves cover it
+
+Arrows(0.45, 92.5,
+       0.04, 92.5,
+       col = ColorBlindColors_cuvres[1],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+```
+## Table 2
+```{r Table_2 , echo = F, warning = F, message = F, eval = T, cache = T, fig.width = 8.5, fig.height = 11}
+
+#--------------------------------------------------------------
+# Select FR1
+#--------------------------------------------------------------
+
+input.rat.data <- rat_list[[1]]
+
+#--------------------------------------------------------------
+# grab each model fit and calculate fitted curve
+#--------------------------------------------------------------
+
+C_1CM.model.temp <- get(paste0(rat.labels[1],'_full.data_','C_1CM','.nls.fit'))
+C_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                         c(coef(C_1CM.model.temp),
+                           model = 'C_1CM',
+                         time = list(input.rat.data$time),
+                         D_0 = list(min(input.rat.data$D_0))))
+
+L_1CM.model.temp <- get(paste0(rat.labels[1],'_full.data_','L_1CM','.nls.fit'))
+L_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                         c(coef(L_1CM.model.temp),
+                           model = 'L_1CM',
+                         time = list(input.rat.data$time),
+                         D_0 = list(min(input.rat.data$D_0))))
+
+E_1CM.model.temp <- get(paste0(rat.labels[1],'_full.data_','E_1CM','.nls.fit'))
+E_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                         c(coef(E_1CM.model.temp),
+                           model = 'E_1CM',
+                         time = list(input.rat.data$time),
+                         D_0 = list(min(input.rat.data$D_0))))
+
+R_1CM.model.temp <- get(paste0(rat.labels[1],'_full.data_','R_1CM','.nls.fit'))
+R_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                         c(coef(R_1CM.model.temp),
+                           model = 'R_1CM',
+                         time = list(input.rat.data$time),
+                         D_0 = list(min(input.rat.data$D_0))))
+
+C_2CM.model.temp <- get(paste0(rat.labels[1],'_full.data_','C_2CM','.nls.fit'))
+C_2CM.fitted.curve.temp <- do.call('C_P.fit',
+                         c(coef(C_2CM.model.temp),
+                           model = 'C_2CM',
+                         time = list(input.rat.data$time),
+                         D_0 = list(min(input.rat.data$D_0))))
+
+#--------------------------------------------------------------
+# Grab parameter estimates, calculate 95% Approximate CI bounds,
+# BIC, AIC, and RMSE
+#--------------------------------------------------------------
+
+C_1CM.out <- if(NROW(C_1CM.model.temp) == 3){'-'}else{
+  list('Parameter Estimates & Approximate 95% CI' = Approx.CI('C_1CM',
+        D_0 = min(input.rat.data$D_0),
+        C_1CM.model.temp),
+     'BIC' = BIC(C_1CM.model.temp),
+     'AIC' = AIC(C_1CM.model.temp),
+     'RMSE' = sqrt(mean((input.rat.data$conc.C_P - C_1CM.fitted.curve.temp)^2)))}
+
+L_1CM.out <- if(NROW(L_1CM.model.temp) == 3){'-'}else{
+  list('Parameter Estimates & Approximate 95% CI' = Approx.CI('L_1CM',
+                                                                      D_0 = min(input.rat.data$D_0),
+                                                                      L_1CM.model.temp),
+       'BIC' = BIC(L_1CM.model.temp),
+       'AIC' = AIC(L_1CM.model.temp),
+       'RMSE' = sqrt(mean((input.rat.data$conc.C_P - L_1CM.fitted.curve.temp)^2)))}
+
+E_1CM.out <- if(NROW(E_1CM.model.temp) == 3){'-'}else{
+  list('Parameter Estimates & Approximate 95% CI' = Approx.CI('E_1CM',
+                                                                      D_0 = min(input.rat.data$D_0),
+                                                                      E_1CM.model.temp),
+       'BIC' = BIC(E_1CM.model.temp),
+       'AIC' = AIC(E_1CM.model.temp),
+       'RMSE' = sqrt(mean((input.rat.data$conc.C_P - E_1CM.fitted.curve.temp)^2)))}
+
+R_1CM.out <- if(NROW(R_1CM.model.temp) == 3){'-'}else{
+  list('Parameter Estimates & Approximate 95% CI' = Approx.CI('R_1CM',
+                                                                      D_0 = min(input.rat.data$D_0),
+                                                                      R_1CM.model.temp),
+       'BIC' = BIC(R_1CM.model.temp),
+       'AIC' = AIC(R_1CM.model.temp),
+       'RMSE' = sqrt(mean((input.rat.data$conc.C_P - R_1CM.fitted.curve.temp)^2)))}
+
+C_2CM.out <- if(NROW(C_2CM.model.temp) == 3){'-'}else{
+  list('Parameter Estimates & Approximate 95% CI' = Approx.CI('C_2CM',
+                                                                      D_0 = min(input.rat.data$D_0),
+                                                                      C_2CM.model.temp),
+       'BIC' = BIC(C_2CM.model.temp),
+       'AIC' = AIC(C_2CM.model.temp),
+       'RMSE' = sqrt(mean((input.rat.data$conc.C_P - C_2CM.fitted.curve.temp)^2)))}
+
+#--------------------------------------------------------------
+# Return list of outputs, plus number of observations and durtation
+#--------------------------------------------------------------
+
+list('C_1CM' = C_1CM.out,
+     'L_1CM' = L_1CM.out,
+     'E_1CM' = E_1CM.out,
+     'R_1CM' = R_1CM.out,
+     'C_2CM' = C_2CM.out,
+     'Number of Observations' = NROW(input.rat.data$time),
+     'Durtation' = max(input.rat.data$time) - min(input.rat.data$time))
+
+
+```
+## Figure 4
+```{r Figure_4, echo = F, warning = F, message = F, results = 'hide', eval = T, cache = T, fig.width = 11, fig.height = 8.5}
+
+#===============================================================================================
+#-----------------------------------------------------------------------------------------------
+# Figure 4
+#-----------------------------------------------------------------------------------------------
+#===============================================================================================
+
+#--------------------------------------------------------------
+# Grab parameter estimates from each NLS fit and calculate 
+# fitted elimination curves.
+#--------------------------------------------------------------
+
+  C_1CM.Asym <- Approx.CI('C_1CM', D_0 = min(input.rat.data$D_0), get(paste0(rat.labels[1],'_full.data_','C_1CM','.nls.fit')))
+  C_1CM.ke <- rep(C_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[2], NROW(input.rat.data$time))
+
+  L_1CM.Asym <- Approx.CI('L_1CM', D_0 = min(input.rat.data$D_0), get(paste0(rat.labels[1],'_full.data_','L_1CM','.nls.fit')))
+  L_1CM.ke <- L_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[3] * input.rat.data$time + L_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[2]
+  
+  E_1CM.Asym <- Approx.CI('E_1CM', D_0 = min(input.rat.data$D_0), get(paste0(rat.labels[1],'_full.data_','E_1CM','.nls.fit')))
+  E_1CM.ke <- E_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[2] * exp( -E_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[3] * input.rat.data$time )
+  
+  R_1CM.Asym <- Approx.CI('R_1CM', D_0 = min(input.rat.data$D_0), get(paste0(rat.labels[1],'_full.data_','R_1CM','.nls.fit')))
+  R_1CM.ke <- R_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[2] / (R_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[3] * input.rat.data$time + 1)
+  
+  C_2CM.Asym <- Approx.CI('C_2CM', D_0 = min(input.rat.data$D_0), get(paste0(rat.labels[1],'_full.data_','C_2CM','.nls.fit')))
+  C_2CM.ke <- rep(C_2CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[2], NROW(input.rat.data$time))
+
+  
+#--------------------------------------------------------------
+# Calculate min and max across all curves
+#--------------------------------------------------------------
+
+  max.max <- max(C_1CM.ke, L_1CM.ke, E_1CM.ke, R_1CM.ke, C_2CM.ke)
+  min.min <- min(C_1CM.ke, L_1CM.ke, E_1CM.ke, R_1CM.ke, C_2CM.ke)
+
+  par(pty = 's')
+  
+  plot(input.rat.data$time, C_2CM.ke,
+       type='l',
+       pch = 16,
+       cex = 0.75,
+       main = "",
+       font = 2,
+       xlab = "",
+       ylab = "",
+       xaxs = "i",
+       lwd=2,
+       col = 'white',
+       cex.axis = 1.5,
+       ylim = c(min.min-1, max.max+1),
+       las = 1)
+
+  abline(h = 0, lty = 2)
+  abline(v = 0, lty = 2)
+  
+
+  lines(input.rat.data$time, C_1CM.ke,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[1])
+
+  lines(input.rat.data$time, C_2CM.ke,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[2])
+
+  lines(input.rat.data$time, L_1CM.ke,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[3])
+
+  lines(input.rat.data$time, E_1CM.ke,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[4])
+
+  lines(input.rat.data$time, R_1CM.ke,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[5])
+
+text(x= 0.65, y = 2.5,
+     pos = 4,
+     labels=c('Standard one-compartment'),
+     col = ColorBlindColors_cuvres[1], font = 2, cex = 1.25)
+Arrows(0.725, 2.4,
+       0.725, 1.67,
+       col = ColorBlindColors_cuvres[1],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+text(x= 0.7, y = 2.75,
+     pos = 4,
+     labels=c('Standard two-compartment'),
+     col = ColorBlindColors_cuvres[2], font = 2, cex = 1.25)
+Arrows(1.225, 2.65,
+       1.225, 1.275,
+       col = ColorBlindColors_cuvres[2],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+text(x= 0.3, y = 0.35,
+     pos = 4,
+     labels=c('Linearly varying one-compartment'),
+     col = ColorBlindColors_cuvres[3], font = 2, cex = 1.25)
+Arrows(0.975, 0.35,
+       1.13, 0.35,
+       col = ColorBlindColors_cuvres[3],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+text(x= 0.3, y = 3.1,
+     pos = 4,
+     labels=c('Exponentially varying one-compartment'),
+     col = ColorBlindColors_cuvres[4], font = 2, cex = 1.25)
+Arrows(0.5, 2.955,
+       0.5, 1.525,
+       col = ColorBlindColors_cuvres[4],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+text(x= 0.025, y = 3.5,
+     pos = 4,
+     labels=c('Reciprocally varying one-compartment'),
+     col = ColorBlindColors_cuvres[5], font = 2, cex = 1.25)
+Arrows(0.08, 3.35,
+       0.08, 2.65,
+       col = ColorBlindColors_cuvres[5],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 3,
+       lty = 1)
+
+mtext(side = 1, line = -1.75, "Time (h)",
+      font = 2, cex = 2,
+      outer = T)
+mtext(side = 2, line = -8, expression(bold(paste("Proportionality (1 / h)"))),
+      font = 2, cex = 2,
+      outer = T)
+
+```
+## Figure 5
+```{r Figure_5, echo = F, warning = F, message = F, results = 'hide', eval = T, cache = T, fig.width = 11, fig.height = 8.5}
+
+#===============================================================================================
+#-----------------------------------------------------------------------------------------------
+# Figure 5
+#-----------------------------------------------------------------------------------------------
+#===============================================================================================
+
+par(mfrow = c(3,4), pty="s", bg = 'white', mar = c(4, 4, 2, 0))
+
+for(i in 1:NROW(rat_list)){
+  
+  #--------------------------------------------------------------
+  # Grab a rat
+  #--------------------------------------------------------------
+  
+  input.rat.data <- rat_list[[i]]
+  
+  #--------------------------------------------------------------
+  # Fit each model to the data
+  #--------------------------------------------------------------
+  
+  for(j in 1:NROW(considered.models)){
+    assign(paste0(rat.labels[i],'_full.data_',considered.models[j],'.nls.fit'),
+           PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                               model = considered.models[j],
+                               max_iter = max_iter,
+                               converge_crit = converge_crit))
+  }
+  
+  #--------------------------------------------------------------
+  # plot data and fitted curves
+  #--------------------------------------------------------------
+  
+  plot(input.rat.data$time, input.rat.data$conc.C_P,
+       type='p',
+       pch = 16,
+       cex = 0.75,
+       font = 2,
+       xlab = "",
+       ylab = "",
+       cex.axis = 1.5,
+       ylim = c(0-0.1, max(input.rat.data$conc.C_P)),
+       xlim = c(0, max(sapply(rat_list, function (x) max(x$time)))),
+       xaxs = "i",
+       yaxt = "n",
+       las = 1,
+       col = ColorBlindColors_points[1])
+  axis(side = 2, col = "black", 
+       at = pretty(input.rat.data$conc.C_P, n = 3), 
+       labels = pretty(input.rat.data$conc.C_P, n = 3),
+       font = 2,
+       las = 1,
+       cex.axis = 1.5) 
+  mtext(side = 1, line=2.5, "Time (h)", font=2, cex=1, )
+  mtext(side = 2, line=3, expression(bold(paste("Concentration (",mu,"M)"))), font=2, cex=1)
+  abline(h=0)
+  abline(v=0)
+  
+  legend('topright', rat.labels[i], text.font = 2, cex = 1.5, bty = 'n')
+  
+  C_1CM.fitted.curve <- C_P.fit('C_1CM',
+        input.rat.data$time,
+        D_0 = min(input.rat.data$D_0),
+        V_P = coef(get(paste0(rat.labels[i],'_full.data_','C_1CM','.nls.fit')))[1],
+        k_E = coef(get(paste0(rat.labels[i],'_full.data_','C_1CM','.nls.fit')))[2])
+  
+  L_1CM.fitted.curve <- C_P.fit('L_1CM',
+          input.rat.data$time,
+          D_0 = min(input.rat.data$D_0),
+          V_P = coef(get(paste0(rat.labels[i],'_full.data_','L_1CM','.nls.fit')))[1],
+          k_E0 = coef(get(paste0(rat.labels[i],'_full.data_','L_1CM','.nls.fit')))[2],
+          b_E = coef(get(paste0(rat.labels[i],'_full.data_','L_1CM','.nls.fit')))[3])
+  
+  E_1CM.fitted.curve <- C_P.fit('E_1CM',
+          input.rat.data$time,
+          D_0 = min(input.rat.data$D_0),
+          V_P = coef(get(paste0(rat.labels[i],'_full.data_','E_1CM','.nls.fit')))[1],
+          k_E0 = coef(get(paste0(rat.labels[i],'_full.data_','E_1CM','.nls.fit')))[2],
+          b_E = coef(get(paste0(rat.labels[i],'_full.data_','E_1CM','.nls.fit')))[3])
+  
+  R_1CM.fitted.curve <- C_P.fit('R_1CM',
+          input.rat.data$time,
+          D_0 = min(input.rat.data$D_0),
+          V_P = coef(get(paste0(rat.labels[i],'_full.data_','R_1CM','.nls.fit')))[1],
+          k_E0 = coef(get(paste0(rat.labels[i],'_full.data_','R_1CM','.nls.fit')))[2],
+          b_E = coef(get(paste0(rat.labels[i],'_full.data_','R_1CM','.nls.fit')))[3])
+
+  C_2CM.fitted.curve <- C_P.fit('C_2CM',
+          input.rat.data$time,
+          D_0 = min(input.rat.data$D_0),
+          A = coef(get(paste0(rat.labels[i],'_full.data_','C_2CM','.nls.fit')))[1],
+          a = coef(get(paste0(rat.labels[i],'_full.data_','C_2CM','.nls.fit')))[2],
+          B = coef(get(paste0(rat.labels[i],'_full.data_','C_2CM','.nls.fit')))[3],
+          b = coef(get(paste0(rat.labels[i],'_full.data_','C_2CM','.nls.fit')))[4])
+  
+  lines(input.rat.data$time, C_1CM.fitted.curve,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[1])
+  
+  lines(input.rat.data$time, C_2CM.fitted.curve,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[2])
+  
+  lines(input.rat.data$time, L_1CM.fitted.curve,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[3])
+  
+  lines(input.rat.data$time, E_1CM.fitted.curve,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[4])
+  
+  lines(input.rat.data$time, R_1CM.fitted.curve,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[5])
+  
+}
+
+```
+## Table 3
+```{r Table_3 , echo = F, warning = F, message = F, eval = T, cache = T, fig.width = 8.5, fig.height = 11}
+
+for(i in 1:NROW(rat_list)){
+  
+  #--------------------------------------------------------------
+  # Select Rat
+  #--------------------------------------------------------------
+
+  input.rat.data <- rat_list[[i]]
+  
+  #--------------------------------------------------------------
+  # grab each model fit and calculate fitted curve
+  #--------------------------------------------------------------
+
+  C_1CM.model.temp <- get(paste0(rat.labels[i],'_full.data_','C_1CM','.nls.fit'))
+  C_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(C_1CM.model.temp),
+                             model = 'C_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  L_1CM.model.temp <- get(paste0(rat.labels[i],'_full.data_','L_1CM','.nls.fit'))
+  L_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(L_1CM.model.temp),
+                             model = 'L_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  E_1CM.model.temp <- get(paste0(rat.labels[i],'_full.data_','E_1CM','.nls.fit'))
+  E_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(E_1CM.model.temp),
+                             model = 'E_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  R_1CM.model.temp <- get(paste0(rat.labels[i],'_full.data_','R_1CM','.nls.fit'))
+  R_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(R_1CM.model.temp),
+                             model = 'R_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  C_2CM.model.temp <- get(paste0(rat.labels[i],'_full.data_','C_2CM','.nls.fit'))
+  C_2CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(C_2CM.model.temp),
+                             model = 'C_2CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  #--------------------------------------------------------------
+  # Grab parameter estimates, calculate 95% Approximate CI bounds,
+  # BIC, AIC, and RMSE
+  #--------------------------------------------------------------
+
+  C_1CM.out <- if(NROW(C_1CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('C_1CM',
+          D_0 = min(input.rat.data$D_0),
+          C_1CM.model.temp),
+       'BIC' = BIC(C_1CM.model.temp),
+       'AIC' = AIC(C_1CM.model.temp),
+       'RMSE' = sqrt(mean((input.rat.data$conc.C_P - C_1CM.fitted.curve.temp)^2)))}
+  
+  L_1CM.out <- if(NROW(L_1CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('L_1CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        L_1CM.model.temp),
+         'BIC' = BIC(L_1CM.model.temp),
+         'AIC' = AIC(L_1CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - L_1CM.fitted.curve.temp)^2)))}
+  
+  E_1CM.out <- if(NROW(E_1CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('E_1CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        E_1CM.model.temp),
+         'BIC' = BIC(E_1CM.model.temp),
+         'AIC' = AIC(E_1CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - E_1CM.fitted.curve.temp)^2)))}
+  
+  R_1CM.out <- if(NROW(R_1CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('R_1CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        R_1CM.model.temp),
+         'BIC' = BIC(R_1CM.model.temp),
+         'AIC' = AIC(R_1CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - R_1CM.fitted.curve.temp)^2)))}
+  
+  C_2CM.out <- if(NROW(C_2CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('C_2CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        C_2CM.model.temp),
+         'BIC' = BIC(C_2CM.model.temp),
+         'AIC' = AIC(C_2CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - C_2CM.fitted.curve.temp)^2)))}
+  
+  #--------------------------------------------------------------
+  # Return list of outputs, plus number of observations and durtation
+  #--------------------------------------------------------------
+  
+  list.out.temp <- list('C_1CM' = C_1CM.out,
+       'L_1CM' = L_1CM.out,
+       'E_1CM' = E_1CM.out,
+       'R_1CM' = R_1CM.out,
+       'C_2CM' = C_2CM.out,
+       'Number of Observations' = NROW(input.rat.data$time),
+       'Durtation' = max(input.rat.data$time) - min(input.rat.data$time))
+  
+  
+  names(list.out.temp) <- paste0(rat.labels[i],' - ',names(list.out.temp))
+  
+  
+  # print output
+  print(list.out.temp)
+
+}
+
+```
+## Figure 6
+```{r Figure_6, echo = F, warning = F, message = F, results = 'hide', eval = T, cache = T, fig.width = 11, fig.height = 8.5}
+
+  #--------------------------------------------------------------
+  # Fit C_2CM model to estimate distribution parameter
+  #--------------------------------------------------------------
+
+  distrbution.time.hr <- c()
+  
+  for(i in 1:NROW(rat_list)){
+    
+    fit.temp <- get(paste0(rat.labels[i],'_full.data_','C_2CM','.nls.fit'))
+    
+    fit.temp.est <- Approx.CI(model = 'C_2CM', D_0 = min(input.rat.data$D_0), fit.temp)
+    
+    distrbution.time.hr.temp <- if(rat.labels[i] == 'MR5' || rat.labels[i] == 'MR4'){
+      1/fit.temp.est$`Estimates and Approximate Confidence Bounds - Untransformed`$Estimates[4]
+    }else{
+      1/fit.temp.est$`Estimates and Approximate Confidence Bounds - Untransformed`$Estimates[2]
+    }
+    
+    distrbution.time.hr <- c(distrbution.time.hr, distrbution.time.hr.temp)
+    
+  }
+
+  #--------------------------------------------------------------
+  # Mask Data according to the distribution parameter estimate 
+  # for each rat
+  #--------------------------------------------------------------
+
+  rat_list_trunc.indiv <- list()
+  
+  for(i in 1:NROW(rat_list)){
+    rat_list_trunc.indiv[[i]] <- rat_list[[i]][rat_list[[i]]$time > distrbution.time.hr[i],]
+  }
+  
+  #===============================================================================================
+  #-----------------------------------------------------------------------------------------------
+  # Figure 6
+  #-----------------------------------------------------------------------------------------------
+  #===============================================================================================
+  
+  #--------------------------------------------------------------
+  # Apply reciprocally varying models to each rat and calculate
+  # fitted cuvre and fitted elimaintion curve
+  #--------------------------------------------------------------
+  
+  for(i in 1:NROW(rat.labels)){
+    
+    input.rat.data <- rat_list_trunc.indiv[[i]]
+    
+    assign(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','.nls.fit'),
+           PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                                 model = 'R_1CM',
+                                 max_iter = max_iter,
+                                 converge_crit = converge_crit))
+    
+    if(NROW(get(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','.nls.fit'))) == 3){
+      assign(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','.nls.fit.est'),
+             '-')
+      }else{
+    assign(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','.nls.fit.est'),
+           Approx.CI(model = 'R_1CM',
+                     D_0 = min(input.rat.data$D_0),
+                     get(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','.nls.fit'))))
+      }
+    
+    if(NROW(get(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','.nls.fit'))) == 3){
+      assign(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','.elim.fitted.curve'),
+             '-')
+          assign(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','fitted.curve'),
+             '-')
+      
+      
+    }else{
+      temp.est.df <- get(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','.nls.fit.est'))
+      
+      assign(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','.elim.fitted.curve'),
+             temp.est.df$`Estimates and Approximate Confidence Bounds`$Estimates[2]/(temp.est.df$`Estimates and Approximate Confidence Bounds`$Estimates[3]*input.rat.data$time + 1))
+      
+      
+      assign(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','fitted.curve'),
+             do.call('C_P.fit',
+                           c(coef(get(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','.nls.fit'))),
+                             model = 'R_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+      )
+      
+    }
+    
+  
+    
+  }
+  
+  #--------------------------------------------------------------
+  # Define Rat colors
+  #--------------------------------------------------------------
+  
+  rat.colors <- c(paletteMartin[1],
+                  paletteMartin[3],
+                  paletteMartin[11],
+                  paletteMartin[6],
+                  paletteMartin[8],
+                  paletteMartin[9],
+                  paletteMartin[4],
+                  paletteMartin[12],
+                  paletteMartin[14],
+                  paletteMartin[13])
+  
+  #---------------------------------------------------------
+  # Plot for Figure 6
+  #---------------------------------------------------------
+  
+  par(mfrow=c(1,2), pty="s", bg = 'white')
+  
+  #---------------------------------------------------------
+  # Left plot for Figure 6 - female rats
+  #---------------------------------------------------------
+  
+  plot(rat_list_trunc.indiv[[7]]$time, MR3_indiv.masked.data_R_1CM.elim.fitted.curve,
+       type='l',
+       pch = 16,
+       cex = 0.75,
+       main = "",
+       font = 2,
+       xlab = "",
+       ylab = "",
+       xaxs = "i",
+       lwd=2,
+       col = 'white',
+       cex.axis = 1.5,
+       xlim = c(-0.3, 2.4),
+       ylim = c(-0.1, 6.1),
+       las = 1)
+  
+  mtext(side = 1, line =2.5, "Time (h)",
+        font = 2, cex = 1.5)
+  mtext(side = 2, line = 2.5, expression(bold(paste("Proportionality (1 / h)"))),
+        font = 2, cex = 1.5)
+  abline(h = 0, lty = 2)
+  abline(v = 0, lty = 2)
+  
+  lines(rat_list_trunc.indiv[[1]]$time, FR1_indiv.masked.data_R_1CM.elim.fitted.curve,
+        type = 'l', lwd=2, col = rat.colors[1])
+  lines(rat_list_trunc.indiv[[2]]$time, FR2_indiv.masked.data_R_1CM.elim.fitted.curve,
+        type = 'l', lwd=2, col = rat.colors[2])
+  lines(rat_list_trunc.indiv[[3]]$time, FR3_indiv.masked.data_R_1CM.elim.fitted.curve,
+        type = 'l', lwd=2, col = rat.colors[3])
+  lines(rat_list_trunc.indiv[[4]]$time, FR4_indiv.masked.data_R_1CM.elim.fitted.curve,
+        type = 'l', lwd=2, col = rat.colors[4])
+  
+  #--------------------------------------------------------------
+  # Plot the pointwise Approximate bounds for each curve
+  #--------------------------------------------------------------
+  
+  for(j in 1:4){
+    
+    rat.data <- rat_list_trunc.indiv[[j]]
+
+    CI <- matrix(NA,NROW(rat.data$time),3)
+    
+    for(i in 1:NROW(rat.data$time)){
+      
+      nls_fit.temp <- get(paste0(rat.labels[j],'_indiv.masked.data_','R_1CM','.nls.fit'))
+      
+      CI.temp <- (nlConfint(nls_fit.temp, paste("b[2] / (b[3] * ",rat.data$time[i]," + 1)")))
+      
+      CI[i,1] <- CI.temp[1] - qt(1-0.05/2, summary(nls_fit.temp)$df[2])*(CI.temp[3]-CI.temp[1])/qnorm(1-0.05/2, 0, 1)
+      CI[i,2] <- CI.temp[1]
+      CI[i,3] <- CI.temp[1] + qt(1-0.05/2, summary(nls_fit.temp)$df[2])*(CI.temp[3]-CI.temp[1])/qnorm(1-0.05/2, 0, 1)
+      
+    }
+    
+    colbli <- rat.colors[j]
+    colbli_to_rbg <- col2rgb(colbli)
+    
+    polygon(c(rat.data$time, rev(rat.data$time)), c(CI[,1], rev(CI[,3])),
+            border = NA,
+            col = rgb(red = colbli_to_rbg[1]/255, green = colbli_to_rbg[2]/255, blue = colbli_to_rbg[3]/255, alpha = 0.25))
+    
+    lines(rat.data$time, CI[,2],
+          type = 'l', lwd = 1.5, col = colbli)
+    
+    lines(rat.data$time, CI[,1],
+          type = 'l', lwd = 1.0, col = colbli,
+          lty = 3)
+    
+    lines(rat.data$time, CI[,3],
+          type = 'l', lwd = 1.0, col = colbli,
+          lty = 3)
+    
+    
+    abline(v = min(rat.data$time) + 1, lty = 2, col = colbli)
+    
+  }
+  
+  #--------------------------------------------------------------
+  # Label each curve
+  #--------------------------------------------------------------
+  
+  text(min(rat_list_trunc.indiv[[1]]$time), max(FR1_indiv.masked.data_R_1CM.elim.fitted.curve),
+       labels=c('FR1'),
+       font = 2, cex = 0.8, col = rat.colors[1],
+       pos = 2)
+  text(max(rat_list_trunc.indiv[[2]]$time), max(FR2_indiv.masked.data_R_1CM.elim.fitted.curve),
+       labels=c('FR2'),
+       font = 2, cex = 0.8, col = rat.colors[2],
+       pos = 4)
+  text(min(rat_list_trunc.indiv[[3]]$time), max(FR3_indiv.masked.data_R_1CM.elim.fitted.curve),
+       labels=c('FR3'),
+       font = 2, cex = 0.8, col = rat.colors[3],
+       pos = 2)
+  text(min(rat_list_trunc.indiv[[4]]$time)-0.1, max(FR4_indiv.masked.data_R_1CM.elim.fitted.curve),
+       labels=c('FR4'),
+       font = 2, cex = 0.8, col = rat.colors[4],
+       pos = 1)
+  
+  # ---------------------------------------------------------
+  # Right plot for Figure 6 - male rats
+  # ---------------------------------------------------------
+  
+  plot(rat_list_trunc.indiv[[7]]$time, MR3_indiv.masked.data_R_1CM.elim.fitted.curve,
+       type='l',
+       pch = 16,
+       cex = 0.75,
+       main = "",
+       font = 2,
+       xlab = "",
+       ylab = "",
+       xaxs = "i",
+       lwd=2,
+       col = 'white',
+       cex.axis = 1.5,
+       xlim = c(-0.3  , 2.4),
+       ylim = c(-0.1, 6.1),
+       las = 1)
+  
+  mtext(side = 1, line =2.5, "Time (h)",
+        font = 2, cex = 1.5)
+  mtext(side = 2, line = 2.5, expression(bold(paste("Proportionality (1 / h)"))),
+        font = 2, cex = 1.5)
+  abline(h = 0, lty = 2)
+  abline(v = 0, lty = 2)
+  
+  lines(rat_list_trunc.indiv[[5]]$time, MR1_indiv.masked.data_R_1CM.elim.fitted.curve,
+        type = 'l', lwd=2, col = rat.colors[5])
+  lines(rat_list_trunc.indiv[[6]]$time, MR2_indiv.masked.data_R_1CM.elim.fitted.curve,
+        type = 'l', lwd=2, col = rat.colors[6])
+  lines(rat_list_trunc.indiv[[7]]$time, MR3_indiv.masked.data_R_1CM.elim.fitted.curve,
+        type = 'l', lwd=2, col = rat.colors[7])
+  lines(rat_list_trunc.indiv[[8]]$time, MR4_indiv.masked.data_R_1CM.elim.fitted.curve,
+        type = 'l', lwd=2, col = rat.colors[8])
+  lines(rat_list_trunc.indiv[[10]]$time, MR8_indiv.masked.data_R_1CM.elim.fitted.curve,
+        type = 'l', lwd=2, col = rat.colors[10])
+  
+  abline(v = 1.2, lty = 2, col = 'grey')
+  
+  #--------------------------------------------------------------
+  # Plot the pointwise Approximate bounds for each curve
+  #--------------------------------------------------------------
+  
+  for(j in c(5:8,10)){
+    
+    rat.data <- rat_list_trunc.indiv[[j]]
+
+    CI <- matrix(NA,NROW(rat.data$time),3)
+    
+    for(i in 1:NROW(rat.data$time)){
+      
+      nls_fit.temp <- get(paste0(rat.labels[j],'_indiv.masked.data_','R_1CM','.nls.fit'))
+      
+      CI.temp <- (nlConfint(nls_fit.temp, paste("b[2] / (b[3] * ",rat.data$time[i]," + 1)")))
+      
+      CI[i,1] <- CI.temp[1] - qt(1-0.05/2, summary(nls_fit.temp)$df[2])*(CI.temp[3]-CI.temp[1])/qnorm(1-0.05/2, 0, 1)
+      CI[i,2] <- CI.temp[1]
+      CI[i,3] <- CI.temp[1] + qt(1-0.05/2, summary(nls_fit.temp)$df[2])*(CI.temp[3]-CI.temp[1])/qnorm(1-0.05/2, 0, 1)
+      
+    }
+    
+    colbli <- rat.colors[j]
+    colbli_to_rbg <- col2rgb(colbli)
+    
+    
+    polygon(c(rat.data$time, rev(rat.data$time)), c(CI[,1], rev(CI[,3])),
+            border = NA,
+            col = rgb(red = colbli_to_rbg[1]/255, green = colbli_to_rbg[2]/255, blue = colbli_to_rbg[3]/255, alpha = 0.25))
+    
+    lines(rat.data$time, CI[,2],
+          type = 'l', lwd = 1.5, col = colbli)
+    
+    lines(rat.data$time, CI[,1],
+          type = 'l', lwd = 1.0, col = colbli,
+          lty = 3)
+    
+    lines(rat.data$time, CI[,3],
+          type = 'l', lwd = 1.0, col = colbli,
+          lty = 3)
+    
+    
+    abline(v = min(rat.data$time) + 1, lty = 2, col = colbli)
+    
+  }
+  
+  #--------------------------------------------------------------
+  # Label each curve
+  #--------------------------------------------------------------
+  
+  text(min(rat_list_trunc.indiv[[5]]$time), max(MR1_indiv.masked.data_R_1CM.elim.fitted.curve),
+       labels=c('MR1'),
+       font = 2, cex = 0.8, col = rat.colors[5],
+       pos = 2)
+  text(min(rat_list_trunc.indiv[[6]]$time), max(MR2_indiv.masked.data_R_1CM.elim.fitted.curve),
+       labels=c('MR2'),
+       font = 2, cex = 0.8, col = rat.colors[6],
+       pos = 2)
+  text(min(rat_list_trunc.indiv[[7]]$time), max(MR3_indiv.masked.data_R_1CM.elim.fitted.curve),
+       labels=c('MR3'),
+       font = 2, cex = 0.8, col = rat.colors[7],
+       pos = 2)
+  text(min(rat_list_trunc.indiv[[8]]$time), max(MR4_indiv.masked.data_R_1CM.elim.fitted.curve),
+       labels=c('MR4'),
+       font = 2, cex = 0.8, col = rat.colors[8],
+       pos = 2)
+  text(min(rat_list_trunc.indiv[[10]]$time), max(MR8_indiv.masked.data_R_1CM.elim.fitted.curve),
+       labels=c('MR8'),
+       font = 2, cex = 0.8, col = rat.colors[10],
+       pos = 2)
+  
+```
+## Table 4
+```{r Table_4 , echo = F, warning = F, message = F, eval = T, cache = T, fig.width = 8.5, fig.height = 11}
+
+for(i in 1:NROW(rat.labels)){
+
+  #--------------------------------------------------------------
+  # Select Rat
+  #--------------------------------------------------------------
+    
+  input.rat.data <- rat_list_trunc.indiv[[i]]
+  
+  #--------------------------------------------------------------
+  # Apply reciprocally varying models to each rat and calculate
+  # fitted cuvre and fitted elimaintion curve
+  #--------------------------------------------------------------
+  
+  assign(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','.nls.fit'),
+         PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                               model = 'C_1CM',
+                               max_iter = max_iter,
+                               converge_crit = converge_crit))
+  
+  if(NROW(get(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','.nls.fit'))) == 3){
+    assign(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','.nls.fit.est'),
+           '-')
+    }else{
+  assign(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','.nls.fit.est'),
+         Approx.CI(model = 'C_1CM',
+                   D_0 = min(input.rat.data$D_0),
+                   get(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','.nls.fit'))))
+    }
+  
+  if(NROW(get(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','.nls.fit'))) == 3){
+    assign(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','.fitted.curve'),
+           '-')
+        
+    assign(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','fitted.curve'),
+           '-')
+  }else{
+    temp.est.df <- get(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','.nls.fit.est'))
+    
+    assign(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','.fitted.curve'),
+           temp.est.df$`Estimates and Approximate Confidence Bounds`$Estimates[2]/(temp.est.df$`Estimates and Approximate Confidence Bounds`$Estimates[3]*input.rat.data$time + 1))
+    
+    assign(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','fitted.curve'),
+           do.call('C_P.fit',
+                         c(coef(get(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','.nls.fit'))),
+                           model = 'C_1CM',
+                         time = list(input.rat.data$time),
+                         D_0 = list(min(input.rat.data$D_0))))
+    )
+    
+  }
+  
+}
+
+#--------------
+
+for(i in 1:NROW(rat_list_trunc.indiv)){
+  
+  #--------------------------------------------------------------
+  # grab a rat
+  #--------------------------------------------------------------
+  
+  input.rat.data <- rat_list_trunc.indiv[[i]]
+
+  #--------------------------------------------------------------
+  # grab the C_1CM and R_1CM models fits
+  #--------------------------------------------------------------
+  
+  C_1CM.model.temp <- get(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','.nls.fit'))
+  R_1CM.model.temp <- get(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','.nls.fit'))
+  
+  #--------------------------------------------------------------
+  # Grab parameter estimates, calculate 95% Approximate CI bounds,
+  # BIC, AIC, and RMSE
+  #--------------------------------------------------------------
+  
+  C_1CM.out <- if(NROW(C_1CM.model.temp) == 3){'-'}else{
+    
+    C_1CM.fitted.curve.temp <- get(paste0(rat.labels[i],'_indiv.masked.data_','C_1CM','fitted.curve'))
+    
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('C_1CM',
+          D_0 = min(input.rat.data$D_0),
+          C_1CM.model.temp),
+       'BIC' = BIC(C_1CM.model.temp),
+       'AIC' = AIC(C_1CM.model.temp),
+       'RMSE' = sqrt(mean((input.rat.data$conc.C_P - C_1CM.fitted.curve.temp)^2)))}
+  
+  R_1CM.out <- if(NROW(R_1CM.model.temp) == 3){'-'}else{
+    
+    R_1CM.fitted.curve.temp <- get(paste0(rat.labels[i],'_indiv.masked.data_','R_1CM','fitted.curve'))
+    
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('R_1CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        R_1CM.model.temp),
+         'BIC' = BIC(R_1CM.model.temp),
+         'AIC' = AIC(R_1CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - R_1CM.fitted.curve.temp)^2)))}
+  
+  #--------------------------------------------------------------
+  # Return list of outputs, plus number of observations and durtation
+  #--------------------------------------------------------------
+  
+  list.out.temp <- list('C_1CM' = C_1CM.out,
+       'R_1CM' = R_1CM.out,
+       'Number of Observations' = NROW(input.rat.data$time),
+       'Durtation' = max(input.rat.data$time) - min(input.rat.data$time))
+  
+  
+  names(list.out.temp) <- paste0(rat.labels[i],' - ',names(list.out.temp))
+  
+  # print output
+  print(list.out.temp)
+
+}
+
+```
+## Figure 7
+```{r Figure_7, echo = F, warning = F, message = F, results = 'hide', eval = T, cache = T, fig.width = 11, fig.height = 8.5}
+
+#===============================================================================================
+#-----------------------------------------------------------------------------------------------
+# Figure 7
+#-----------------------------------------------------------------------------------------------
+#===============================================================================================
+
+#--------------------------------------------------------------
+# Grab FR1
+#--------------------------------------------------------------
+
+input.rat.data <-  inclusive.median.set[[1]]
+
+#--------------------------------------------------------------
+# Apply each model to FR1 subset data
+#--------------------------------------------------------------
+
+for(i in 1:NROW(considered.models)){
+  assign(paste0(rat.labels[1],'_sparsified.data_',considered.models[i],'nls.fit'),
+         PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                             model = considered.models[i],
+                             max_iter = max_iter,
+                             converge_crit = converge_crit))
+}
+
+#=========================================================
+#---------------------------------------------------------
+# Plot for Figure 7
+#---------------------------------------------------------
+#=========================================================
+
+par(mfrow=c(1,1), pty="s", bg = 'white')
+
+plot(input.rat.data$time, input.rat.data$conc.C_P,
+     type='p',
+     pch = 16,
+     cex = 0.75,
+     main = "",
+     font = 2,
+     xlab = "",
+     ylab = "",
+     cex.axis = 1.5,
+     col = ColorBlindColors_points[1],
+     xlim = c(min(input.rat.data$time), max(input.rat.data$time)),
+     ylim = c(0-0.1,max(input.rat.data$conc.C_P)+1),
+     las = 1)
+mtext(side = 1, line =2.5, "Time (h)",
+      font = 2, cex = 1.5)
+mtext(side = 2, line = 2.5, expression(bold(paste("Concentration (",mu,"M)"))),
+      font = 2, cex = 1.5)
+abline(h = 0, lty = 3)
+abline(v = 0, lty = 3)
+
+time_for_fit <- seq(min(input.rat.data$time), max(input.rat.data$time), length.out = 150)
+
+  C_1CM.fitted.curve <- C_P.fit('C_1CM',
+        time_for_fit,
+        D_0 = min(input.rat.data$D_0),
+        V_P = coef(get(paste0(rat.labels[1],'_sparsified.data_','C_1CM','nls.fit')))[1],
+        k_E = coef(get(paste0(rat.labels[1],'_sparsified.data_','C_1CM','nls.fit')))[2])
+  
+  L_1CM.fitted.curve <- C_P.fit('L_1CM',
+          time_for_fit,
+          D_0 = min(input.rat.data$D_0),
+          V_P = coef(get(paste0(rat.labels[1],'_sparsified.data_','L_1CM','nls.fit')))[1],
+          k_E0 = coef(get(paste0(rat.labels[1],'_sparsified.data_','L_1CM','nls.fit')))[2],
+          b_E = coef(get(paste0(rat.labels[1],'_sparsified.data_','L_1CM','nls.fit')))[3])
+  
+  E_1CM.fitted.curve <- C_P.fit('E_1CM',
+          time_for_fit,
+          D_0 = min(input.rat.data$D_0),
+          V_P = coef(get(paste0(rat.labels[1],'_sparsified.data_','E_1CM','nls.fit')))[1],
+          k_E0 = coef(get(paste0(rat.labels[1],'_sparsified.data_','E_1CM','nls.fit')))[2],
+          b_E = coef(get(paste0(rat.labels[1],'_sparsified.data_','E_1CM','nls.fit')))[3])
+  
+  R_1CM.fitted.curve <- C_P.fit('R_1CM',
+          time_for_fit,
+          D_0 = min(input.rat.data$D_0),
+          V_P = coef(get(paste0(rat.labels[1],'_sparsified.data_','R_1CM','nls.fit')))[1],
+          k_E0 = coef(get(paste0(rat.labels[1],'_sparsified.data_','R_1CM','nls.fit')))[2],
+          b_E = coef(get(paste0(rat.labels[1],'_sparsified.data_','R_1CM','nls.fit')))[3])
+
+  C_2CM.fitted.curve <- C_P.fit('C_2CM',
+          time_for_fit,
+          D_0 = min(input.rat.data$D_0),
+          A = coef(get(paste0(rat.labels[1],'_sparsified.data_','C_2CM','nls.fit')))[1],
+          a = coef(get(paste0(rat.labels[1],'_sparsified.data_','C_2CM','nls.fit')))[2],
+          B = coef(get(paste0(rat.labels[1],'_sparsified.data_','C_2CM','nls.fit')))[3],
+          b = coef(get(paste0(rat.labels[1],'_sparsified.data_','C_2CM','nls.fit')))[4])
+
+#-----------#
+# C_1CM Fit #
+#-----------#
+
+lines(time_for_fit, C_1CM.fitted.curve,
+      type = 'l', lwd=2, col = ColorBlindColors_cuvres[1])
+text(x= 0.5, y = 18,
+     labels=c('Standard one-compartment'),
+     col = ColorBlindColors_cuvres[1], font = 2, cex = 1.1)
+Arrows(0.75, 18,
+       1.12, 18,
+       col = ColorBlindColors_cuvres[1],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 2,
+       lty = 1)
+
+#-----------#
+# C_2CM Fit #
+#-----------#
+
+lines(time_for_fit, C_2CM.fitted.curve,
+      type = 'l',lwd=2, col = ColorBlindColors_cuvres[2])
+text(x = 0.7, y = 70,
+     labels=c('Standard two-compartment'),
+     col = ColorBlindColors_cuvres[2], font = 2, cex = 1.1)
+Arrows(0.44, 70, 
+       0.16, 70, 
+       col = ColorBlindColors_cuvres[2],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 2,
+       lty = 1)
+
+#-----------#
+# L_1CM Fit #
+#-----------#
+
+lines(time_for_fit, L_1CM.fitted.curve,
+      type = 'l',lwd=2, col = ColorBlindColors_cuvres[3])
+text(x= 0.75, y = 65,
+     labels=c('Linearly varying one-compartment'),
+     col = ColorBlindColors_cuvres[3], font=2, cex=1.1)
+Arrows(0.44, 65, 
+       0.20, 65, 
+       col = ColorBlindColors_cuvres[3],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 2,
+       lty = 1)
+
+#-----------#
+# E_1CM Fit #
+#-----------#
+
+lines(time_for_fit, E_1CM.fitted.curve,
+      type = 'l', lwd = 2, col = ColorBlindColors_cuvres[4])
+text(x= 0.8, y =60,
+     labels = c('Exponentially varying one-compartment'),
+     col = ColorBlindColors_cuvres[4], font = 2, cex = 1.1)
+Arrows(0.44, 60, 
+       0.25, 60, 
+       col = ColorBlindColors_cuvres[4],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 2,
+       lty = 1)
+
+#-----------#
+# R_1CM Fit #
+#-----------#
+
+lines(time_for_fit, R_1CM.fitted.curve,
+      type = 'l', lwd = 2, col = ColorBlindColors_cuvres[5])
+text(x= 0.8, y =55,
+     labels = c('Reciprocally varying one-compartment'),
+     col = ColorBlindColors_cuvres[5], font = 2, cex = 1.1)
+Arrows(0.44, 55, 
+       0.30, 55, 
+       col = ColorBlindColors_cuvres[5],
+       arr.type = 'triangle',
+       arr.width=0.15,
+       lwd = 2,
+       lty = 1)
+
+```
+## Table 5
+```{r Table_5 , echo = F, warning = F, message = F, eval = T, cache = T, fig.width = 8.5, fig.height = 11}
+  
+  #--------------------------------------------------------------
+  # Grab FR1
+  #--------------------------------------------------------------
+  
+  input.rat.data <- inclusive.median.set$Female.IV.Rat1
+
+  #--------------------------------------------------------------
+  # grab each model fit and calculate fitted curve
+  #--------------------------------------------------------------
+
+  C_1CM.model.temp <- get(paste0(rat.labels[1],'_sparsified.data_','C_1CM','nls.fit'))
+  C_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(C_1CM.model.temp),
+                             model = 'C_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  L_1CM.model.temp <- get(paste0(rat.labels[1],'_sparsified.data_','L_1CM','nls.fit'))
+  L_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(L_1CM.model.temp),
+                             model = 'L_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  E_1CM.model.temp <- get(paste0(rat.labels[1],'_sparsified.data_','E_1CM','nls.fit'))
+  E_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(E_1CM.model.temp),
+                             model = 'E_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  R_1CM.model.temp <- get(paste0(rat.labels[1],'_sparsified.data_','R_1CM','nls.fit'))
+  R_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(R_1CM.model.temp),
+                             model = 'R_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  C_2CM.model.temp <- get(paste0(rat.labels[1],'_sparsified.data_','C_2CM','nls.fit'))
+  C_2CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(C_2CM.model.temp),
+                             model = 'C_2CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  #--------------------------------------------------------------
+  # Grab parameter estimates, calculate 95% Approximate CI bounds,
+  # BIC, AIC, and RMSE
+  #--------------------------------------------------------------
+  
+  C_1CM.out <- if(NROW(C_1CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('C_1CM',
+          D_0 = min(input.rat.data$D_0),
+          C_1CM.model.temp),
+       'BIC' = BIC(C_1CM.model.temp),
+       'AIC' = AIC(C_1CM.model.temp),
+       'RMSE' = sqrt(mean((input.rat.data$conc.C_P - C_1CM.fitted.curve.temp)^2)))}
+  
+  L_1CM.out <- if(NROW(L_1CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('L_1CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        L_1CM.model.temp),
+         'BIC' = BIC(L_1CM.model.temp),
+         'AIC' = AIC(L_1CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - L_1CM.fitted.curve.temp)^2)))}
+  
+  
+  E_1CM.out <- if(NROW(E_1CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('E_1CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        E_1CM.model.temp),
+         'BIC' = BIC(E_1CM.model.temp),
+         'AIC' = AIC(E_1CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - E_1CM.fitted.curve.temp)^2)))}
+  
+  
+  R_1CM.out <- if(NROW(R_1CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('R_1CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        R_1CM.model.temp),
+         'BIC' = BIC(R_1CM.model.temp),
+         'AIC' = AIC(R_1CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - R_1CM.fitted.curve.temp)^2)))}
+  
+  
+  C_2CM.out <- if(NROW(C_2CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('C_2CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        C_2CM.model.temp),
+         'BIC' = BIC(C_2CM.model.temp),
+         'AIC' = AIC(C_2CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - C_2CM.fitted.curve.temp)^2)))}
+  
+  #--------------------------------------------------------------
+  # Return list of outputs, plus number of observations and durtation
+  #--------------------------------------------------------------
+  
+  list('C_1CM' = C_1CM.out,
+       'L_1CM' = L_1CM.out,
+       'E_1CM' = E_1CM.out,
+       'R_1CM' = R_1CM.out,
+       'C_2CM' = C_2CM.out,
+       'Number of Observations' = NROW(input.rat.data$time),
+       'Durtation' = max(input.rat.data$time) - min(input.rat.data$time))
+
+```
+## SI Data Masking
+```{r SI_Data_Masking, echo = F, warning = F, message = F, eval = T, cache = T}
+
+#--------------------------------------------------------------
+# Create function to mask first five min of data
+#--------------------------------------------------------------
+
+rat_list_trunc.5min.func <- function(x){
+  
+  x <- x[x$time > 5/60,]
+  
+  return(list(x))
+}
+
+#--------------------------------------------------------------
+# Apply truncation function
+#--------------------------------------------------------------
+
+rat_list_trunc.5min <- sapply(rat_list, rat_list_trunc.5min.func)
+
+#--------------------------------------------------------------
+# Create function to truncate first thirty min of data
+#--------------------------------------------------------------
+
+rat_list_trunc.30min.func <- function(x){
+  
+  x <- x[x$time > 30/60,]
+  
+  return(list(x))
+}
+
+#--------------------------------------------------------------
+# Apply truncation function
+#--------------------------------------------------------------
+
+rat_list_trunc.30min <- sapply(rat_list, rat_list_trunc.30min.func)
+
+#--------------------------------------------------------------
+# Apply models to 5min masked data and return BIC values
+#--------------------------------------------------------------
+
+for(i in 1:NROW(rat.labels)){
+  
+  input.rat.data <- rat_list_trunc.5min[[i]]
+  
+  temp.C_1CM.nls.fit <- PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                                        model = 'C_1CM',
+                                        max_iter = max_iter,
+                                        converge_crit = converge_crit)
+  
+    temp.R_1CM.nls.fit <- PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                                        model = 'R_1CM',
+                                        max_iter = max_iter,
+                                        converge_crit = converge_crit)
+  
+    temp.out <- c(if(NROW(temp.C_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.C_1CM.nls.fit),1)},
+                  if(NROW(temp.R_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.R_1CM.nls.fit),1)})
+    
+    names(temp.out) <- c(paste0(rat.labels[i],' - Standard One-Compartment'),
+                         paste0(rat.labels[i],' - Reciporcal One-Compartment'))
+    
+  print(temp.out)
+  
+}
+
+#--------------------------------------------------------------
+# Apply models to 12min masked data and return BIC values
+#--------------------------------------------------------------
+
+for(i in 1:NROW(rat.labels)){
+  
+  input.rat.data <- rat_list_trunc.30min[[i]]
+  
+  temp.C_1CM.nls.fit <- PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                                        model = 'C_1CM',
+                                        max_iter = max_iter,
+                                        converge_crit = converge_crit)
+  
+    temp.R_1CM.nls.fit <- PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                                        model = 'R_1CM',
+                                        max_iter = max_iter,
+                                        converge_crit = converge_crit)
+    
+  
+    temp.out <- c(if(NROW(temp.C_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.C_1CM.nls.fit),1)},
+                  if(NROW(temp.R_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.R_1CM.nls.fit),1)})
+    
+    names(temp.out) <- c(paste0(rat.labels[i],' - Standard One-Compartment'),
+                         paste0(rat.labels[i],' - Reciporcal One-Compartment'))
+    
+  print(temp.out)
+
+}
+
+```
+## SI Analysis of Sparsified Datasets
+```{r SI_Analysis_of_Sparsified_Datasets, echo = F, warning = F, message = F, eval = T, cache = T, fig.width = 11, fig.height = 8.5}
+
+#--------------------------------------------------------------
+# Create function to subset data on a log-time sacle
+#--------------------------------------------------------------
+
+inclusive.median.log <- function(x){
+  
+  x <- x[-1,]
+  
+  inclusive.median <- aggregate(log(x$time), 
+                                by = list(cut(log(x$time),
+                                              seq(min(log(x$time)),
+                                                  max(log(x$time)),length.out = subset.n + 1), include.lowest = T)),
+                                inclusive.median.func)
+  
+  nearest.pos <- inclusive.median$x
+  
+  nearest.values <- sapply(nearest.pos, function(z) which.min(abs(log(x$time) - z)))
+  
+  return(list(x[nearest.values,]))
+  
+}
+
+#--------------------------------------------------------------
+# Create function to subset data on a exp-time sacle
+#--------------------------------------------------------------
+
+inclusive.median.exp <- function(x){
+  
+  inclusive.median <- aggregate(exp(x$time), 
+                                by = list(cut(exp(x$time),
+                                              seq(min(exp(x$time)),
+                                                  max(exp(x$time)),length.out = subset.n + 1), include.lowest = T)),
+                                inclusive.median.func)
+  
+  nearest.pos <- inclusive.median$x
+  
+  nearest.values <- sapply(nearest.pos, function(z) which.min(abs(exp(x$time) - z)))
+  
+  return(list(x[nearest.values,]))
+  
+}
+
+#--------------------------------------------------------------
+# Apply function to data
+#--------------------------------------------------------------
+
+inclusive.median.log.set <- sapply(rat_list, inclusive.median.log)
+inclusive.median.exp.set <- sapply(rat_list, inclusive.median.exp)
+
+
+#===============================================================================================
+#-----------------------------------------------------------------------------------------------
+# Table SI2 and Figure SI1
+#-----------------------------------------------------------------------------------------------
+#===============================================================================================
+
+par(mfrow = c(3,4), pty="s", bg = 'white', mar = c(4, 4, 2, 0))
+
+BIC.out.median <- c()
+
+for(i in 1:NROW(inclusive.median.set)){
+  
+  #--------------------------------------------------------------
+  # Grab rat
+  #--------------------------------------------------------------
+  
+  input.rat.data = inclusive.median.set[[i]]
+  
+  #--------------------------------------------------------------
+  # Apply each model to rat data
+  #--------------------------------------------------------------
+  
+  for(j in 1:NROW(considered.models)){
+    assign(paste0(considered.models[j],'.nls.fit'),
+           PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                               model = considered.models[j],
+                               max_iter = max_iter,
+                               converge_crit = converge_crit))
+  }
+  
+  #--------------------------------------------------------------
+  # Grab model
+  #--------------------------------------------------------------
+    
+  temp.C_1CM.nls.fit <- get(paste0('C_1CM.nls.fit'))
+  temp.L_1CM.nls.fit <- get(paste0('L_1CM.nls.fit'))
+  temp.E_1CM.nls.fit <- get(paste0('E_1CM.nls.fit'))
+  temp.R_1CM.nls.fit <- get(paste0('R_1CM.nls.fit'))
+  temp.C_2CM.nls.fit <- get(paste0('C_2CM.nls.fit'))
+  
+  #--------------------------------------------------------------
+  # Calculate BIC
+  #--------------------------------------------------------------
+  
+  temp.out <- cbind(if(NROW(temp.C_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.C_1CM.nls.fit),1)},
+                if(NROW(temp.L_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.L_1CM.nls.fit),1)},
+                if(NROW(temp.E_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.E_1CM.nls.fit),1)},
+                if(NROW(temp.R_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.R_1CM.nls.fit),1)},
+                if(NROW(temp.C_2CM.nls.fit) == 3){'-'}else{round(BIC(temp.C_2CM.nls.fit),1)})
+  
+  #--------------------------------------------------------------
+  # Save BIC
+  #--------------------------------------------------------------
+  
+  BIC.out.median <- rbind(BIC.out.median, temp.out)
+    
+  #=========================================================
+  #---------------------------------------------------------
+  # Figure SI1
+  #---------------------------------------------------------
+  #=========================================================
+  
+  plot(input.rat.data$time, input.rat.data$conc.C_P,
+       type='p',
+       pch = 16,
+       cex = 0.75,
+       main = "",
+       font = 2,
+       xlab = "",
+       ylab = "",
+       cex.axis = 1.5,
+       col = ColorBlindColors_points[1],
+       xlim = c(min(input.rat.data$time), max(input.rat.data$time)),
+       ylim = c(0-0.1,max(input.rat.data$conc.C_P)+1),
+       las = 1)
+  mtext(side = 1, line =2.5, "Time (h)",
+        font = 2, cex = 1.5)
+  mtext(side = 2, line = 2.5, expression(bold(paste("Concentration (",mu,"M)"))),
+        font = 2, cex = 1.5)
+  abline(h = 0, lty = 3)
+  abline(v = 0, lty = 3)
+  
+  legend('topright', rat.labels[i], text.font = 2, cex = 1.5, bty = 'n')
+  
+  time_for_fit <- seq(min(input.rat.data$time), max(input.rat.data$time), length.out = 150)
+  
+    C_1CM.fitted.curve <- C_P.fit('C_1CM',
+          time_for_fit,
+          D_0 = min(input.rat.data$D_0),
+          V_P = coef(C_1CM.nls.fit)[1],
+          k_E = coef(C_1CM.nls.fit)[2])
+    
+    L_1CM.fitted.curve <- C_P.fit('L_1CM',
+            time_for_fit,
+            D_0 = min(input.rat.data$D_0),
+            V_P = coef(L_1CM.nls.fit)[1],
+            k_E0 = coef(L_1CM.nls.fit)[2],
+            b_E = coef(L_1CM.nls.fit)[3])
+    
+    E_1CM.fitted.curve <- C_P.fit('E_1CM',
+            time_for_fit,
+            D_0 = min(input.rat.data$D_0),
+            V_P = coef(E_1CM.nls.fit)[1],
+            k_E0 = coef(E_1CM.nls.fit)[2],
+            b_E = coef(E_1CM.nls.fit)[3])
+    
+    R_1CM.fitted.curve <- C_P.fit('R_1CM',
+            time_for_fit,
+            D_0 = min(input.rat.data$D_0),
+            V_P = coef(R_1CM.nls.fit)[1],
+            k_E0 = coef(R_1CM.nls.fit)[2],
+            b_E = coef(R_1CM.nls.fit)[3])
+  
+    C_2CM.fitted.curve <- C_P.fit('C_2CM',
+            time_for_fit,
+            D_0 = min(input.rat.data$D_0),
+            A = coef(C_2CM.nls.fit)[1],
+            a = coef(C_2CM.nls.fit)[2],
+            B = coef(C_2CM.nls.fit)[3],
+            b = coef(C_2CM.nls.fit)[4])
+  
+  #-----------#
+  # C_1CM Fit #
+  #-----------#
+  if(NROW(C_1CM.fitted.curve) != 0){
+  lines(time_for_fit, C_1CM.fitted.curve,
+        type = 'l', lwd=2, col = ColorBlindColors_cuvres[1])
+  }
+  
+  #-----------#
+  # C_2CM Fit #
+  #-----------#
+  if(NROW(C_2CM.fitted.curve) != 0){
+  lines(time_for_fit, C_2CM.fitted.curve,
+        type = 'l',lwd=2, col = ColorBlindColors_cuvres[2])
+  }
+  
+  #-----------#
+  # L_1CM Fit #
+  #-----------#
+  if(NROW(L_1CM.fitted.curve) != 0){
+  lines(time_for_fit, L_1CM.fitted.curve,
+        type = 'l',lwd=2, col = ColorBlindColors_cuvres[3])
+  }
+  
+  #-----------#
+  # E_1CM Fit #
+  #-----------#
+  if(NROW(E_1CM.fitted.curve) != 0){
+  lines(time_for_fit, E_1CM.fitted.curve,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[4])
+  }
+  
+  #-----------#
+  # R_1CM Fit #
+  #-----------#
+  if(NROW(R_1CM.fitted.curve) != 0){
+  lines(time_for_fit, R_1CM.fitted.curve,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[5])
+  }
+
+}
+
+plot.new()
+
+legend('center',
+       'Median\nSubset', text.font = 2, cex = 1.5, bty = 'n')
+
+#--------------------------------------------------------------
+# Save BIC output as a data frame and print 
+#--------------------------------------------------------------
+  
+BIC.out.median <- data.frame(BIC.out.median)
+
+names(BIC.out.median) <- c('Standard One-Compartment',
+                     'Linear One-Compartment',
+                     'Exponential One-Compartment',
+                     'Reciporcal One-Compartment',
+                     'Standard Two-Compartment')
+row.names(BIC.out.median) <- rat.labels
+
+print(BIC.out.median)
+
+#===============================================================================================
+#-----------------------------------------------------------------------------------------------
+# Table SI3 and  Figure SI2
+#-----------------------------------------------------------------------------------------------
+#===============================================================================================
+
+par(mfrow = c(3,4), pty="s", bg = 'white', mar = c(4, 4, 2, 0))
+
+BIC.out.log.median <- c()
+
+for(i in 1:NROW(inclusive.median.log.set)){
+
+  #--------------------------------------------------------------
+  # Grab rat
+  #--------------------------------------------------------------
+  
+  input.rat.data = inclusive.median.log.set[[i]]
+  
+  #--------------------------------------------------------------
+  # Apply each model to rat data
+  #--------------------------------------------------------------
+  
+  for(j in 1:NROW(considered.models)){
+    assign(paste0(considered.models[j],'.nls.fit'),
+           PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                               model = considered.models[j],
+                               max_iter = max_iter,
+                               converge_crit = converge_crit))
+  }
+   
+  #--------------------------------------------------------------
+  # Grab model
+  #--------------------------------------------------------------
+   
+  temp.C_1CM.nls.fit <- get(paste0('C_1CM.nls.fit'))
+  temp.L_1CM.nls.fit <- get(paste0('L_1CM.nls.fit'))
+  temp.E_1CM.nls.fit <- get(paste0('E_1CM.nls.fit'))
+  temp.R_1CM.nls.fit <- get(paste0('R_1CM.nls.fit'))
+  temp.C_2CM.nls.fit <- get(paste0('C_2CM.nls.fit'))
+  
+  
+  #--------------------------------------------------------------
+  # Calculate BIC
+  #--------------------------------------------------------------
+  
+  temp.out <- cbind(if(NROW(temp.C_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.C_1CM.nls.fit),1)},
+                if(NROW(temp.L_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.L_1CM.nls.fit),1)},
+                if(NROW(temp.E_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.E_1CM.nls.fit),1)},
+                if(NROW(temp.R_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.R_1CM.nls.fit),1)},
+                if(NROW(temp.C_2CM.nls.fit) == 3){'-'}else{round(BIC(temp.C_2CM.nls.fit),1)})
+  
+  #--------------------------------------------------------------
+  # Save BIC
+  #--------------------------------------------------------------
+  
+  BIC.out.log.median <- rbind(BIC.out.log.median, temp.out)
+  
+  #=========================================================
+  #---------------------------------------------------------
+  # Figure SI2
+  #---------------------------------------------------------
+  #=========================================================
+  
+  plot(input.rat.data$time, input.rat.data$conc.C_P,
+       type='p',
+       pch = 16,
+       cex = 0.75,
+       main = "",
+       font = 2,
+       xlab = "",
+       ylab = "",
+       cex.axis = 1.5,
+       col = ColorBlindColors_points[1],
+       xlim = c(min(input.rat.data$time), max(input.rat.data$time)),
+       ylim = c(0-0.1,max(input.rat.data$conc.C_P)+1),
+       las = 1)
+  mtext(side = 1, line =2.5, "Time (h)",
+        font = 2, cex = 1.5)
+  mtext(side = 2, line = 2.5, expression(bold(paste("Concentration (",mu,"M)"))),
+        font = 2, cex = 1.5)
+  abline(h = 0, lty = 3)
+  abline(v = 0, lty = 3)
+  
+  legend('topright', rat.labels[i], text.font = 2, cex = 1.5, bty = 'n')
+  
+  time_for_fit <- seq(min(input.rat.data$time), max(input.rat.data$time), length.out = 150)
+  
+    C_1CM.fitted.curve <- C_P.fit('C_1CM',
+          time_for_fit,
+          D_0 = min(input.rat.data$D_0),
+          V_P = coef(C_1CM.nls.fit)[1],
+          k_E = coef(C_1CM.nls.fit)[2])
+    
+    L_1CM.fitted.curve <- C_P.fit('L_1CM',
+            time_for_fit,
+            D_0 = min(input.rat.data$D_0),
+            V_P = coef(L_1CM.nls.fit)[1],
+            k_E0 = coef(L_1CM.nls.fit)[2],
+            b_E = coef(L_1CM.nls.fit)[3])
+    
+    E_1CM.fitted.curve <- C_P.fit('E_1CM',
+            time_for_fit,
+            D_0 = min(input.rat.data$D_0),
+            V_P = coef(E_1CM.nls.fit)[1],
+            k_E0 = coef(E_1CM.nls.fit)[2],
+            b_E = coef(E_1CM.nls.fit)[3])
+    
+    R_1CM.fitted.curve <- C_P.fit('R_1CM',
+            time_for_fit,
+            D_0 = min(input.rat.data$D_0),
+            V_P = coef(R_1CM.nls.fit)[1],
+            k_E0 = coef(R_1CM.nls.fit)[2],
+            b_E = coef(R_1CM.nls.fit)[3])
+  
+    C_2CM.fitted.curve <- C_P.fit('C_2CM',
+            time_for_fit,
+            D_0 = min(input.rat.data$D_0),
+            A = coef(C_2CM.nls.fit)[1],
+            a = coef(C_2CM.nls.fit)[2],
+            B = coef(C_2CM.nls.fit)[3],
+            b = coef(C_2CM.nls.fit)[4])
+  
+  #-----------#
+  # C_1CM Fit #
+  #-----------#
+  if(NROW(C_1CM.fitted.curve) != 0){
+  lines(time_for_fit, C_1CM.fitted.curve,
+        type = 'l', lwd=2, col = ColorBlindColors_cuvres[1])
+  }
+  
+  #-----------#
+  # C_2CM Fit #
+  #-----------#
+  if(NROW(C_2CM.fitted.curve) != 0){
+  lines(time_for_fit, C_2CM.fitted.curve,
+        type = 'l',lwd=2, col = ColorBlindColors_cuvres[2])
+  }
+  
+  #-----------#
+  # L_1CM Fit #
+  #-----------#
+  if(NROW(L_1CM.fitted.curve) != 0){
+  lines(time_for_fit, L_1CM.fitted.curve,
+        type = 'l',lwd=2, col = ColorBlindColors_cuvres[3])
+  }
+  
+  #-----------#
+  # E_1CM Fit #
+  #-----------#
+  if(NROW(E_1CM.fitted.curve) != 0){
+  lines(time_for_fit, E_1CM.fitted.curve,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[4])
+  }
+  
+  #-----------#
+  # R_1CM Fit #
+  #-----------#
+  if(NROW(R_1CM.fitted.curve) != 0){
+  lines(time_for_fit, R_1CM.fitted.curve,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[5])
+  }
+
+}
+
+plot.new()
+
+legend('center',
+       'Log-Median\nSubset', text.font = 2, cex = 1.5, bty = 'n')
+
+#--------------------------------------------------------------
+# Save BIC output as a data frame and print 
+#--------------------------------------------------------------
+  
+BIC.out.log.median <- data.frame(BIC.out.log.median)
+
+names(BIC.out.log.median) <- c('Standard One-Compartment',
+                     'Linear One-Compartment',
+                     'Exponential One-Compartment',
+                     'Reciporcal One-Compartment',
+                     'Standard Two-Compartment')
+row.names(BIC.out.log.median) <- rat.labels
+
+print(BIC.out.log.median)
+
+#===============================================================================================
+#-----------------------------------------------------------------------------------------------
+# Table SI4 and Figure SI3
+#-----------------------------------------------------------------------------------------------
+#===============================================================================================
+
+par(mfrow = c(3,4), pty="s", bg = 'white', mar = c(4, 4, 2, 0))
+
+BIC.out.exp.median <- c()
+
+for(i in 1:NROW(inclusive.median.exp.set)){
+
+  #--------------------------------------------------------------
+  # Grab rat
+  #--------------------------------------------------------------
+  
+  input.rat.data = inclusive.median.exp.set[[i]]
+  
+  #--------------------------------------------------------------
+  # Apply each model to rat data
+  #--------------------------------------------------------------
+  
+  for(j in 1:NROW(considered.models)){
+    assign(paste0(considered.models[j],'.nls.fit'),
+           PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                               model = considered.models[j],
+                               max_iter = max_iter,
+                               converge_crit = converge_crit))
+  }
+  
+  #--------------------------------------------------------------
+  # Grab model
+  #--------------------------------------------------------------
+    
+  temp.C_1CM.nls.fit <- get(paste0('C_1CM.nls.fit'))
+  temp.L_1CM.nls.fit <- get(paste0('L_1CM.nls.fit'))
+  temp.E_1CM.nls.fit <- get(paste0('E_1CM.nls.fit'))
+  temp.R_1CM.nls.fit <- get(paste0('R_1CM.nls.fit'))
+  temp.C_2CM.nls.fit <- get(paste0('C_2CM.nls.fit'))
+  
+  #--------------------------------------------------------------
+  # Calculate BIC
+  #--------------------------------------------------------------
+  
+  temp.out <- cbind(if(NROW(temp.C_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.C_1CM.nls.fit),1)},
+                if(NROW(temp.L_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.L_1CM.nls.fit),1)},
+                if(NROW(temp.E_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.E_1CM.nls.fit),1)},
+                if(NROW(temp.R_1CM.nls.fit) == 3){'-'}else{round(BIC(temp.R_1CM.nls.fit),1)},
+                if(NROW(temp.C_2CM.nls.fit) == 3){'-'}else{round(BIC(temp.C_2CM.nls.fit),1)})
+  
+  
+  #--------------------------------------------------------------
+  # Save BIC
+  #--------------------------------------------------------------
+  
+  BIC.out.exp.median <- rbind(BIC.out.exp.median, temp.out)
+  
+  #=========================================================
+  #---------------------------------------------------------
+  # Figure SI3
+  #---------------------------------------------------------
+  #=========================================================
+  
+  plot(input.rat.data$time, input.rat.data$conc.C_P,
+       type='p',
+       pch = 16,
+       cex = 0.75,
+       main = "",
+       font = 2,
+       xlab = "",
+       ylab = "",
+       cex.axis = 1.5,
+       col = ColorBlindColors_points[1],
+       xlim = c(min(input.rat.data$time), max(input.rat.data$time)),
+       ylim = c(0-0.1,max(input.rat.data$conc.C_P)+1),
+       las = 1)
+  mtext(side = 1, line =2.5, "Time (h)",
+        font = 2, cex = 1.5)
+  mtext(side = 2, line = 2.5, expression(bold(paste("Concentration (",mu,"M)"))),
+        font = 2, cex = 1.5)
+  abline(h = 0, lty = 3)
+  abline(v = 0, lty = 3)
+  
+  legend('topright', rat.labels[i], text.font = 2, cex = 1.5, bty = 'n')
+  
+  time_for_fit <- seq(min(input.rat.data$time), max(input.rat.data$time), length.out = 150)
+  
+    C_1CM.fitted.curve <- C_P.fit('C_1CM',
+          time_for_fit,
+          D_0 = min(input.rat.data$D_0),
+          V_P = coef(C_1CM.nls.fit)[1],
+          k_E = coef(C_1CM.nls.fit)[2])
+    
+    L_1CM.fitted.curve <- C_P.fit('L_1CM',
+            time_for_fit,
+            D_0 = min(input.rat.data$D_0),
+            V_P = coef(L_1CM.nls.fit)[1],
+            k_E0 = coef(L_1CM.nls.fit)[2],
+            b_E = coef(L_1CM.nls.fit)[3])
+    
+    E_1CM.fitted.curve <- C_P.fit('E_1CM',
+            time_for_fit,
+            D_0 = min(input.rat.data$D_0),
+            V_P = coef(E_1CM.nls.fit)[1],
+            k_E0 = coef(E_1CM.nls.fit)[2],
+            b_E = coef(E_1CM.nls.fit)[3])
+    
+    R_1CM.fitted.curve <- C_P.fit('R_1CM',
+            time_for_fit,
+            D_0 = min(input.rat.data$D_0),
+            V_P = coef(R_1CM.nls.fit)[1],
+            k_E0 = coef(R_1CM.nls.fit)[2],
+            b_E = coef(R_1CM.nls.fit)[3])
+  
+    C_2CM.fitted.curve <- C_P.fit('C_2CM',
+            time_for_fit,
+            D_0 = min(input.rat.data$D_0),
+            A = coef(C_2CM.nls.fit)[1],
+            a = coef(C_2CM.nls.fit)[2],
+            B = coef(C_2CM.nls.fit)[3],
+            b = coef(C_2CM.nls.fit)[4])
+  
+  #-----------#
+  # C_1CM Fit #
+  #-----------#
+  if(NROW(C_1CM.fitted.curve) != 0){
+  lines(time_for_fit, C_1CM.fitted.curve,
+        type = 'l', lwd=2, col = ColorBlindColors_cuvres[1])
+  }
+  
+  #-----------#
+  # C_2CM Fit #
+  #-----------#
+  if(NROW(C_2CM.fitted.curve) != 0){
+  lines(time_for_fit, C_2CM.fitted.curve,
+        type = 'l',lwd=2, col = ColorBlindColors_cuvres[2])
+  }
+  
+  #-----------#
+  # L_1CM Fit #
+  #-----------#
+  if(NROW(L_1CM.fitted.curve) != 0){
+  lines(time_for_fit, L_1CM.fitted.curve,
+        type = 'l',lwd=2, col = ColorBlindColors_cuvres[3])
+  }
+  
+  #-----------#
+  # E_1CM Fit #
+  #-----------#
+  if(NROW(E_1CM.fitted.curve) != 0){
+  lines(time_for_fit, E_1CM.fitted.curve,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[4])
+  }
+  
+  #-----------#
+  # R_1CM Fit #
+  #-----------#
+  if(NROW(R_1CM.fitted.curve) != 0){
+  lines(time_for_fit, R_1CM.fitted.curve,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[5])
+  }
+
+}
+
+plot.new()
+
+legend('center',
+       'Exp-Median\nSubset', text.font = 2, cex = 1.5, bty = 'n')
+
+#--------------------------------------------------------------
+# Save BIC output as a data frame and print 
+#--------------------------------------------------------------
+  
+BIC.out.exp.median <- data.frame(BIC.out.exp.median)
+
+names(BIC.out.exp.median) <- c('Standard One-Compartment',
+                     'Linear One-Compartment',
+                     'Exponential One-Compartment',
+                     'Reciporcal One-Compartment',
+                     'Standard Two-Compartment')
+row.names(BIC.out.exp.median) <- rat.labels
+
+print(BIC.out.exp.median)
+
+```
+## Table SI5
+```{r Table_SI5 , echo = F, warning = F, message = F, eval = T, cache = T, fig.width = 8.5, fig.height = 11}
+
+for(i in 1:NROW(inclusive.median.set)){
+  
+  #--------------------------------------------------------------
+  # Select Rat
+  #--------------------------------------------------------------
+
+  input.rat.data <- inclusive.median.set[[i]]
+  
+  #--------------------------------------------------------------
+  # grab each model fit and calculate fitted curve
+  #--------------------------------------------------------------
+  
+  for(j in 1:NROW(considered.models)){
+    assign(paste0(rat.labels[i],'_full.data_',considered.models[j],'.nls.fit'),
+           PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                               model = considered.models[j],
+                               max_iter = max_iter,
+                               converge_crit = converge_crit))
+  }
+  
+  C_1CM.model.temp <- get(paste0(rat.labels[i],'_full.data_','C_1CM','.nls.fit'))
+  C_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(C_1CM.model.temp),
+                             model = 'C_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  L_1CM.model.temp <- get(paste0(rat.labels[i],'_full.data_','L_1CM','.nls.fit'))
+  L_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(L_1CM.model.temp),
+                             model = 'L_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  E_1CM.model.temp <- get(paste0(rat.labels[i],'_full.data_','E_1CM','.nls.fit'))
+  E_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(E_1CM.model.temp),
+                             model = 'E_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  R_1CM.model.temp <- get(paste0(rat.labels[i],'_full.data_','R_1CM','.nls.fit'))
+  R_1CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(R_1CM.model.temp),
+                             model = 'R_1CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  C_2CM.model.temp <- get(paste0(rat.labels[i],'_full.data_','C_2CM','.nls.fit'))
+  C_2CM.fitted.curve.temp <- do.call('C_P.fit',
+                           c(coef(C_2CM.model.temp),
+                             model = 'C_2CM',
+                           time = list(input.rat.data$time),
+                           D_0 = list(min(input.rat.data$D_0))))
+  
+  #--------------------------------------------------------------
+  # Grab parameter estimates, calculate 95% Approximate CI bounds,
+  # BIC, AIC, and RMSE
+  #--------------------------------------------------------------
+  
+  C_1CM.out <- if(NROW(C_1CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('C_1CM',
+          D_0 = min(input.rat.data$D_0),
+          C_1CM.model.temp),
+       'BIC' = BIC(C_1CM.model.temp),
+       'AIC' = AIC(C_1CM.model.temp),
+       'RMSE' = sqrt(mean((input.rat.data$conc.C_P - C_1CM.fitted.curve.temp)^2)))}
+  
+  L_1CM.out <- if(NROW(L_1CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('L_1CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        L_1CM.model.temp),
+         'BIC' = BIC(L_1CM.model.temp),
+         'AIC' = AIC(L_1CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - L_1CM.fitted.curve.temp)^2)))}
+  
+  
+  E_1CM.out <- if(NROW(E_1CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('E_1CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        E_1CM.model.temp),
+         'BIC' = BIC(E_1CM.model.temp),
+         'AIC' = AIC(E_1CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - E_1CM.fitted.curve.temp)^2)))}
+  
+  
+  R_1CM.out <- if(NROW(R_1CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('R_1CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        R_1CM.model.temp),
+         'BIC' = BIC(R_1CM.model.temp),
+         'AIC' = AIC(R_1CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - R_1CM.fitted.curve.temp)^2)))}
+  
+  
+  C_2CM.out <- if(NROW(C_2CM.model.temp) == 3){'-'}else{
+    list('Parameter Estimates & Approximate 95% CI' = Approx.CI('C_2CM',
+                                                                        D_0 = min(input.rat.data$D_0),
+                                                                        C_2CM.model.temp),
+         'BIC' = BIC(C_2CM.model.temp),
+         'AIC' = AIC(C_2CM.model.temp),
+         'RMSE' = sqrt(mean((input.rat.data$conc.C_P - C_2CM.fitted.curve.temp)^2)))}
+  
+  #--------------------------------------------------------------
+  # Return list of outputs, plus number of observations and durtation
+  #--------------------------------------------------------------
+  
+  list.out.temp <- list('C_1CM' = C_1CM.out,
+       'L_1CM' = L_1CM.out,
+       'E_1CM' = E_1CM.out,
+       'R_1CM' = R_1CM.out,
+       'C_2CM' = C_2CM.out,
+       'Number of Observations' = NROW(input.rat.data$time),
+       'Durtation' = max(input.rat.data$time) - min(input.rat.data$time))
+  
+  
+  names(list.out.temp) <- paste0(rat.labels[i],' - ',names(list.out.temp))
+  
+  #print output
+  print(list.out.temp)
+
+}
+
+```
+## Figure SI4
+```{r Figure_SI4, echo = F, warning = F, message = F, results = 'hide', eval = T, cache = T, fig.width = 11, fig.height = 8.5}
+
+par(mfrow = c(3,4), pty="s", bg = 'white', mar = c(4, 4, 2, 0))
+
+for(i in 1:NROW(rat_list)){
+  
+  #--------------------------------------------------------------
+  # Select Rat
+  #--------------------------------------------------------------
+  
+  input.rat.data <- rat_list[[i]]
+
+  #--------------------------------------------------------------
+  # grab each model fit and calculate fitted curve
+  #--------------------------------------------------------------
+  
+  for(j in 1:NROW(considered.models)){
+    assign(paste0(rat.labels[i],'_sparsified.data_',considered.models[j],'.nls.fit'),
+           PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                               model = considered.models[j],
+                               max_iter = max_iter,
+                               converge_crit = converge_crit))
+  }
+  
+  #--------------------------------------------------------------
+  # Grab parameter estimates from each NLS fit and calculate 
+  # fitted elimination curves.
+  #--------------------------------------------------------------
+
+  C_1CM.Asym <- Approx.CI('C_1CM', D_0 = min(input.rat.data$D_0), get(paste0(rat.labels[i],'_sparsified.data_','C_1CM','.nls.fit')))
+  C_1CM.ke <- rep(C_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[2], NROW(input.rat.data$time))
+  
+  L_1CM.Asym <- Approx.CI('L_1CM', D_0 = min(input.rat.data$D_0), get(paste0(rat.labels[i],'_sparsified.data_','L_1CM','.nls.fit')))
+  L_1CM.ke <- L_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[3] * input.rat.data$time + L_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[2]
+  
+  E_1CM.Asym <- Approx.CI('E_1CM', D_0 = min(input.rat.data$D_0), get(paste0(rat.labels[i],'_sparsified.data_','E_1CM','.nls.fit')))
+  E_1CM.ke <- E_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[2] * exp( -E_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[3] * input.rat.data$time )
+  
+  R_1CM.Asym <- Approx.CI('R_1CM', D_0 = min(input.rat.data$D_0), get(paste0(rat.labels[i],'_sparsified.data_','R_1CM','.nls.fit')))
+  R_1CM.ke <- R_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[2] / (R_1CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[3] * input.rat.data$time + 1)
+  
+  C_2CM.Asym <- Approx.CI('C_2CM', D_0 = min(input.rat.data$D_0), get(paste0(rat.labels[i],'_sparsified.data_','C_2CM','.nls.fit')))
+  C_2CM.ke <- rep(C_2CM.Asym$`Estimates and Approximate Confidence Bounds`$Estimates[2], NROW(input.rat.data$time))
+  
+  #--------------------------------------------------------------
+  # Calculate min and max across all curves
+  #--------------------------------------------------------------
+  
+  max.max <- max(C_1CM.ke, L_1CM.ke, E_1CM.ke, R_1CM.ke, C_2CM.ke)
+  min.min <- min(C_1CM.ke, L_1CM.ke, E_1CM.ke, R_1CM.ke, C_2CM.ke)
+
+  plot(input.rat.data$time, C_2CM.ke,
+       type='l',
+       pch = 16,
+       cex = 0.75,
+       main = "",
+       font = 2,
+       xlab = "",
+       ylab = "",
+       xaxs = "i",
+       lwd=2,
+       col = 'white',
+       cex.axis = 1.5,
+       ylim = c(min.min-1, max.max+1),
+       las = 1)
+
+  abline(h = 0, lty = 2)
+  abline(v = 0, lty = 2)
+  
+  
+  legend('topright', rat.labels[i], text.font = 2, cex = 1.5, bty = 'n')
+  
+  lines(input.rat.data$time, C_1CM.ke,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[1])
+  lines(input.rat.data$time, C_2CM.ke,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[2])
+  lines(input.rat.data$time, L_1CM.ke,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[3])
+  lines(input.rat.data$time, E_1CM.ke,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[4])
+  lines(input.rat.data$time, R_1CM.ke,
+        type = 'l', lwd = 2, col = ColorBlindColors_cuvres[5])
+}
+
+mtext(side = 1, line = -0, "Time (h)",
+      font = 2, cex = 2,
+      outer = T)
+mtext(side = 2, line = -2.25, expression(bold(paste("Proportionality (1 / h)"))),
+      font = 2, cex = 2,
+      outer = T)
+
+
+```
+## SI Graphical Checks
+```{r SI_Graphical_Checks, echo = F, warning = F, message = F, results = 'hide', eval = T, cache = T, fig.width = 11, fig.height = 8.5}
+
+# BIC preference pulled from Table 3
+BIC.pref <- rbind(c(0, 0, 1, 0, 0),
+c(1, 0, 0, 0, 1),
+c(0, 0, 0, 1, 0),
+c(0, 0, 1, 1, 0),
+c(0, 0, 0, 0, 1),
+c(0, 0, 0, 0, 1),
+c(0, 0, 0, 0, 1),
+c(0, 0, 0, 1, 0),
+c(0, 0, 0, 1, 0),
+c(0, 0, 0, 0, 1))
+
+for(i in 1:NROW(rat_list)){
+  
+  par(mfrow = c(5,5), pty="s", bg = 'white',
+      mar =  c(4, 5, 2, 1),
+      mai =  c(0, 0.5, 0, 0) + 0.1,
+      oma =  c(0, 0, 0, 0) + 4)
+  
+  #--------------------------------------------------------------
+  # Grab rat
+  #--------------------------------------------------------------
+  
+  input.rat.data <- rat_list[[i]]
+  
+  #--------------------------------------------------------------
+  # Apply each model
+  #--------------------------------------------------------------
+  
+  C_1CM <- PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                                 model = 'C_1CM',
+                                 max_iter = max_iter,
+                                 converge_crit = converge_crit)
+  
+  C_2CM <- PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                                 model = 'C_2CM',
+                                 max_iter = max_iter,
+                                 converge_crit = converge_crit)
+  
+  L_1CM <- PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                                 model = 'L_1CM',
+                                 max_iter = max_iter,
+                                 converge_crit = converge_crit)
+  
+  E_1CM <- PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                                 model = 'E_1CM',
+                                 max_iter = max_iter,
+                                 converge_crit = converge_crit)
+  
+  R_1CM <- PK_NLS_Estimation.Seq(input_data = input.rat.data,
+                                 model = 'R_1CM',
+                                 max_iter = max_iter,
+                                 converge_crit = converge_crit)
+  
+  ColorBlindColors_cuvres  <- c(
+    rgb(43/255, 41/255, 43/255), # Black
+    rgb(39/255, 108/255, 189/255), # Strong-blue
+    rgb(241/255, 191/255, 21/255), # Vivid-yellow
+    rgb(247/255, 118/255, 11/255), # Vivid-orange
+    rgb(213/255, 28/255, 60/255) # Vivid-red
+  )
+
+  lty_cuvres  <- c(1,2,4,5,6)
+  
+  #--------------------------------------------------------------
+  # calculate fitted curves of each model and their corresponding
+  # residuals
+  #--------------------------------------------------------------
+  
+  C_1CM.fit <- do.call(C_P.fit,c(list(model = 'C_1CM',
+                           D_0 =  min(input.rat.data$D_0),
+                           time = input.rat.data$time),
+                      coef(C_1CM)))
+  C_1CM.residuals <- input.rat.data$conc.C_P - C_1CM.fit
+  
+  L_1CM.fit <- do.call(C_P.fit,c(list(model = 'L_1CM',
+                                      D_0 =  min(input.rat.data$D_0),
+                                      time = input.rat.data$time),
+                                 coef(L_1CM)))
+  L_1CM.residuals <- input.rat.data$conc.C_P - L_1CM.fit
+  
+  E_1CM.fit <- do.call(C_P.fit,c(list(model = 'E_1CM',
+                                      D_0 =  min(input.rat.data$D_0),
+                                      time = input.rat.data$time),
+                                 coef(E_1CM)))
+  E_1CM.residuals <- input.rat.data$conc.C_P - E_1CM.fit
+  
+  R_1CM.fit <- do.call(C_P.fit,c(list(model = 'R_1CM',
+                                      D_0 =  min(input.rat.data$D_0),
+                                      time = input.rat.data$time),
+                                 coef(R_1CM)))
+  R_1CM.residuals <- input.rat.data$conc.C_P - R_1CM.fit
+  
+  C_2CM.fit <- do.call(C_P.fit,c(list(model = 'C_2CM',
+                                      D_0 =  min(input.rat.data$D_0),
+                                      time = input.rat.data$time),
+                                 coef(C_2CM)))
+  C_2CM.residuals <- input.rat.data$conc.C_P - C_2CM.fit
+  
+  for(j in 1:NROW(considered.models)){
+    
+    #--------------------------------------------------------------
+    # plot fitted vs. observed values
+    #--------------------------------------------------------------
+    
+    plot(get(paste0(considered.models[j], '.fit')), input.rat.data$conc.C_P,
+         type='p',
+         pch = 21,
+         cex = 1.25,
+         main = if(j==1){}else{""},
+         font = 2,
+         ylab = expression(paste("Obs. Values (",mu,"M)")),
+         xaxt='n',
+         lwd=2,
+         col = 'darkgrey',
+         bg='grey',
+         cex.axis = 1.25,
+         las = 1)
+    abline(a = 0, b = 1,
+           lwd = 3,
+           col = 'black',
+           lty = 4)
+    axis(side = 1, col = "black", 
+         at = pretty(get(paste0(considered.models[j], '.fit')), n = 4), 
+         labels = if(j == 5){pretty(get(paste0(considered.models[j], '.fit')), n = 4)}else{rep('', NROW(pretty(get(paste0(considered.models[j], '.fit')), n = 4)))},
+         font = 2,
+         las = 1,
+         cex.axis = 1.25)
+    mtext(side = 2, line=5, paste0(substr(considered.models[j],1,1),'-',substr(considered.models[j],3,5)), font=2, cex=1,
+          col = if(BIC.pref[i,j] == 1){'black'}else{'gray60'})
+    if(j==5){
+      mtext(side = 1, line=3, expression(paste("Fitted Values (",mu,"M)")), font=2, cex=0.75)
+    }
+    
+    #--------------------------------------------------------------
+    # plot fitted vs. residuals
+    #--------------------------------------------------------------
+    
+    plot(get(paste0(considered.models[j], '.fit')), 
+         get(paste0(considered.models[j], '.residuals')),
+         type='p',
+         pch = 21,
+         cex = 1.25,
+         main = if(j==1){}else{""},
+         font = 2,
+         ylab = "Residuals",
+         xaxt='n',
+         lwd=2,
+         col = 'darkgrey',
+         bg='grey',
+         cex.axis = 1.25,
+         las = 1)
+    abline(h = 0,
+           lwd = 3,
+           col = 'black',
+           lty = 4)
+    axis(side = 1, col = "black", 
+         at = pretty(get(paste0(considered.models[j], '.fit')), n = 4), 
+         labels = if(j == 5){pretty(get(paste0(considered.models[j], '.fit')), n = 4)}else{rep('', NROW(pretty(get(paste0(considered.models[j], '.fit')), n = 4)))},
+         font = 2,
+         las = 1,
+         cex.axis = 1.25)
+    if(j==5){
+      mtext(side = 1, line=3, expression(paste("Fitted Values (",mu,"M)")), font=2, cex=0.75)
+    }
+    
+    #--------------------------------------------------------------
+    # time vs. residuals
+    #--------------------------------------------------------------
+    
+    plot(input.rat.data$time,
+         get(paste0(considered.models[j], '.residuals')),
+         type='p',
+         pch = 21,
+         cex = 1.25,
+         main = if(j==1){}else{""},
+         font = 2,
+         ylab = "Residuals",
+         xaxt='n',
+         lwd=2,
+         col = 'darkgrey',
+         bg='grey',
+         cex.axis = 1.25,
+         las = 1)
+    abline(h = 0,
+           lwd = 3,
+           col = 'black',
+           lty = 4)
+    axis(side = 1, col = "black", 
+         at = pretty(input.rat.data$time, n = 4), 
+         labels = if(j == 5){pretty(input.rat.data$time, n = 4)}else{rep('', NROW(pretty(input.rat.data$time, n = 4)))},
+         font = 2,
+         las = 1,
+         cex.axis = 1.25)
+    if(j==5){
+      mtext(side = 1, line=3, "Time (h)", font=1, cex=0.75)
+    }
+    
+    #--------------------------------------------------------------
+    # plot absolute fitted vs. absolute residuals
+    #--------------------------------------------------------------
+    
+    plot(abs(get(paste0(considered.models[j], '.fit'))),
+         abs(get(paste0(considered.models[j], '.residuals'))),
+         type='p',
+         pch = 21,
+         cex = 1.25,
+         main = if(j==1){}else{""},
+         font = 2,
+         ylab = "Absolute Residuals",
+         xaxt='n',
+         lwd=2,
+         col = 'darkgrey',
+         bg='grey',
+         cex.axis = 1.25,
+         las = 1)
+    lines(lowess(abs(get(paste0(considered.models[j], '.fit'))), abs(get(paste0(considered.models[j], '.residuals')))),
+          col='red',
+          lwd = 3,
+          lty = 4)
+    axis(side = 1, col = "black", 
+         at = pretty(abs(get(paste0(considered.models[j], '.fit'))), n = 4), 
+         labels = if(j == 5){pretty(abs(get(paste0(considered.models[j], '.fit'))), n = 4)}else{rep('', NROW(pretty(abs(get(paste0(considered.models[j], '.fit'))), n = 4)))},
+         font = 2,
+         las = 1,
+         cex.axis = 1.25)
+    if(j==5){
+      mtext(side = 1, line=3, expression(paste("Absolute Fitted Values (",mu,"M)")), font=2, cex=0.75)
+    }
+    
+    #--------------------------------------------------------------
+    # plot QQ-Norm Plot
+    #--------------------------------------------------------------
+    
+    qqnorm(get(paste0(considered.models[j], '.residuals')),
+           type='p',
+           pch = 21,
+           cex = 1.25,
+           main = if(j==1){}else{""},
+           font = 2,
+           ylab = "Sample Quantiles",
+           xaxt='n',
+           col = 'darkgrey',
+           bg='grey',
+           cex.axis = 1.25,
+           las = 1)
+    axis(side = 1, col = "black", 
+         at = pretty(get(paste0(considered.models[j], '.residuals')), n = 25), 
+         labels = if(j == 5){pretty(get(paste0(considered.models[j], '.residuals')), n = 25)}else{rep('', NROW(pretty(get(paste0(considered.models[j], '.residuals')), n = 25)))},
+         font = 2,
+         las = 1,
+         cex.axis = 1.25)
+    qqline(get(paste0(considered.models[j], '.residuals')),
+           lwd = 3,
+           col = 'black',
+           lty = 4)
+    if(j==5){
+      mtext(side = 1, line=3, "Theoretical Quantiles", font=1, cex=0.75)
+    }
+    
+  }
+  
+  mtext(side = 3, line=0, rat.labels[i], font=2, cex=2,
+        outer = TRUE)
+
+}
+
+
+```
